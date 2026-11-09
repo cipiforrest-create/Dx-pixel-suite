@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) exit;
  */
 class DXPS_Server {
 
-	const META_API = 'https://graph.facebook.com/v21.0/';
+	const META_API_VERSION = 'v21.0'; // override with the dxps_meta_api_version filter
 	const GA4_API  = 'https://www.google-analytics.com/mp/collect';
 
 	public static function init() {
@@ -24,12 +24,19 @@ class DXPS_Server {
 		if ( DXPS_Helpers::on( 'track_comments' ) ) add_action( 'comment_post', array( __CLASS__, 'on_comment' ), 10, 2 );
 		// ACR: Automatic Conversion Recovery — nightly sweep for missed purchases.
 		add_action( 'dxps_cron_acr', array( __CLASS__, 'acr_run' ) );
-		if ( DXPS_Helpers::on( 'acr_enabled' ) && ! wp_next_scheduled( 'dxps_cron_acr' ) ) {
+		$next = wp_next_scheduled( 'dxps_cron_acr' );
+		if ( DXPS_Helpers::on( 'acr_enabled' ) && ! $next ) {
 			wp_schedule_event( strtotime( 'tomorrow 3am' ), 'daily', 'dxps_cron_acr' );
+		} elseif ( ! DXPS_Helpers::on( 'acr_enabled' ) && $next ) {
+			wp_clear_scheduled_hook( 'dxps_cron_acr' );
 		}
 	}
 
 	private static function simple_user_event( $meta_name, $ga4_name, $user_id = 0, $extra = array() ) {
+		// user_register / comment_post also fire when an administrator creates a user or replies in wp-admin.
+		// Those are not visitor conversions and would carry the administrator's cookies, IP and consent.
+		if ( is_admin() && ! wp_doing_ajax() ) return;
+		if ( wp_doing_ajax() && 'Login' !== $meta_name && ( current_user_can( 'create_users' ) || current_user_can( 'moderate_comments' ) ) ) return;
 		$user = $user_id ? array_filter( array(
 			'em'          => DXPS_Helpers::hash( get_userdata( $user_id )->user_email ?? '' ),
 			'external_id' => DXPS_Helpers::external_id(),
@@ -43,7 +50,7 @@ class DXPS_Server {
 		) ) );
 		$eid = DXPS_Helpers::event_id( $ga4_name );
 		self::send_meta( $meta_name, $extra, $eid, $user );
-		self::send_ga4( $ga4_name, $extra, DXPS_Helpers::ga_client_id() );
+		self::send_ga4( $ga4_name, $extra, DXPS_Helpers::ga_client_id(), array(), $user_id ? (int) $user_id : null );
 	}
 
 	public static function on_signup( $user_id )      { self::simple_user_event( 'CompleteRegistration', 'sign_up', $user_id ); }
@@ -179,8 +186,11 @@ class DXPS_Server {
 	}
 
 	private static function ip() {
-		if ( ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ) return sanitize_text_field( $_SERVER['HTTP_CF_CONNECTING_IP'] );
-		return isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( $_SERVER['REMOTE_ADDR'] ) : '';
+		foreach ( array( 'HTTP_CF_CONNECTING_IP', 'REMOTE_ADDR' ) as $h ) {
+			$v = isset( $_SERVER[ $h ] ) ? trim( (string) $_SERVER[ $h ] ) : '';
+			if ( $v && filter_var( $v, FILTER_VALIDATE_IP ) ) return $v;
+		}
+		return '';
 	}
 
 	private static function meta_event_name( $ga4_name ) {
@@ -292,7 +302,8 @@ class DXPS_Server {
 		if ( $diagnostic ) $body['test_event_code'] = $test_code;
 		elseif ( DXPS_Helpers::opt( 'meta_test_code' ) ) $body['test_event_code'] = DXPS_Helpers::opt( 'meta_test_code' );
 
-		$res = wp_remote_post( self::META_API . $pixel . '/events?access_token=' . rawurlencode( $token ), array(
+		$version = preg_replace( '/[^v0-9.]/', '', (string) apply_filters( 'dxps_meta_api_version', self::META_API_VERSION ) );
+		$res = wp_remote_post( 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . $pixel . '/events?access_token=' . rawurlencode( $token ), array(
 			'timeout' => 5,
 			'headers' => array( 'Content-Type' => 'application/json' ),
 			'body'    => wp_json_encode( $body ),
@@ -313,7 +324,12 @@ class DXPS_Server {
 
 	/* ============================ GA4 MP ============================ */
 
-	public static function send_ga4( $event_name, $params, $client_id, $user_data_ga = array() ) {
+	/**
+	 * @param int|null $user_id GA4 user_id. null = the current visitor, but only on front-end requests. Order-based
+	 *                          sends (status hook, ACR, refunds) must pass the order's customer ID explicitly: they run
+	 *                          in the request of the administrator who changed the order, or in cron.
+	 */
+	public static function send_ga4( $event_name, $params, $client_id, $user_data_ga = array(), $user_id = null ) {
 		$mid    = DXPS_Helpers::opt( 'ga4_id' );
 		$secret = DXPS_Helpers::opt( 'ga4_api_secret' );
 		if ( ! DXPS_Helpers::on( 'ga4_enabled' ) ) return array( 'ok' => false, 'status' => 'disabled' );
@@ -348,7 +364,8 @@ class DXPS_Server {
 			'client_id' => $client_id ?: ( rand( 100000000, 999999999 ) . '.' . time() ),
 			'events'    => array( array( 'name' => $event_name, 'params' => $p ) ),
 		);
-		if ( is_user_logged_in() ) $body['user_id'] = 'u' . get_current_user_id();
+		if ( null === $user_id ) $user_id = ( ! is_admin() && ! wp_doing_cron() && is_user_logged_in() ) ? get_current_user_id() : 0;
+		if ( $user_id > 0 ) $body['user_id'] = 'u' . (int) $user_id;
 		if ( $user_data_ga )       $body['user_data'] = $user_data_ga; // GA4 user-provided data.
 
 		$res = wp_remote_post( self::GA4_API . '?measurement_id=' . rawurlencode( $mid ) . '&api_secret=' . rawurlencode( $secret ), array(
@@ -418,7 +435,7 @@ class DXPS_Server {
 		$ga_user = array( 'sha256_email_address' => DXPS_Helpers::hash( $order->get_billing_email() ) );
 		$phone   = DXPS_Helpers::norm_phone( $order->get_billing_phone(), $order->get_billing_country() );
 		if ( $phone ) $ga_user['sha256_phone_number'] = DXPS_Helpers::hash( $phone );
-		$ga4 = $need_ga4 ? self::send_ga4( 'purchase', $params, $order->get_meta( '_dxps_cid' ), $ga_user ) : array( 'ok' => false, 'status' => 'already_sent_or_disabled' );
+		$ga4 = $need_ga4 ? self::send_ga4( 'purchase', $params, $order->get_meta( '_dxps_cid' ), $ga_user, (int) $order->get_customer_id() ) : array( 'ok' => false, 'status' => 'already_sent_or_disabled' );
 		if ( ! empty( $ga4['ok'] ) ) $order->update_meta_data( '_dxps_ga4_purchase_sent', 1 );
 		$all_done = ( ! DXPS_Helpers::on( 'meta_enabled' ) || $order->get_meta( '_dxps_meta_purchase_sent' ) ) && ( ! DXPS_Helpers::on( 'ga4_enabled' ) || ! DXPS_Helpers::ga4_server_allowed( 'purchase' ) || $order->get_meta( '_dxps_ga4_purchase_sent' ) );
 		if ( $all_done ) $order->update_meta_data( '_dxps_purchase_sent', 1 );
@@ -431,13 +448,17 @@ class DXPS_Server {
 		$order  = wc_get_order( $order_id );
 		$refund = wc_get_order( $refund_id );
 		if ( ! $order || ! $refund ) return;
+		// Refunds run in the administrator's request; consent must come from the customer's checkout snapshot.
+		if ( '1' !== (string) $order->get_meta( '_dxps_marketing_allowed' ) ) return;
+		if ( DXPS_Helpers::sensitive_context( '', array( 'items'=>DXPS_Helpers::order_items( $order ), 'coupons'=>$order->get_coupon_codes() ) ) ) return;
 		$params = array(
-			'transaction_id' => (string) $order->get_order_number(),
-			'value'          => abs( (float) $refund->get_total() ),
-			'currency'       => $order->get_currency(),
+			'transaction_id'          => (string) $order->get_order_number(),
+			'value'                   => abs( (float) $refund->get_total() ),
+			'currency'                => $order->get_currency(),
+			'_dxps_marketing_allowed' => true,
 		);
-		self::send_ga4( 'refund', $params, $order->get_meta( '_dxps_cid' ) );
-		DXPS_Helpers::log( 'Refund sent', array( 'order' => $order_id ) );
+		$res = self::send_ga4( 'refund', $params, $order->get_meta( '_dxps_cid' ), array(), (int) $order->get_customer_id() );
+		DXPS_Helpers::log( 'Refund delivery', array( 'order' => $order_id, 'ga4' => $res ) );
 	}
 
 	public static function is_new_customer( $order ) {

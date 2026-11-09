@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.5.4
-Stable tag: 1.6.0
+Version: 1.6.1
+Stable tag: 1.6.1
 Requires PHP: 7.4
 WooCommerce required. HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,21 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 1.6.1 =
+* Fix: GA4 Measurement Protocol purchases and refunds were sent with the user_id of whoever changed the order (the administrator), not the customer. Order-based sends now use the order's customer ID, and guest orders send none.
+* Fix: refunds used the refunding administrator's consent cookie. They now use the customer's checkout consent snapshot, like purchases, and skip sensitive-health orders.
+* Fix: "Custom events" lost every line after the first when saved. Multi-line rules are kept.
+* Fix: after Save, the settings form showed the old values in that same request, and saving again would write them back. Settings now redirect after saving.
+* Fix: an order status entered as "wc-completed" never matched. The wc- prefix is stripped.
+* Fix: AJAX add-to-cart events had no price or value. Loop buttons now carry data-dxps-price.
+* Fix: an invalid CSS selector in Custom events threw an error on every click.
+* Fix: registrations or comments made by administrators in wp-admin were sent as visitor conversions.
+* Security: the CAPI token and GA4 API secret are no longer printed into the admin page HTML. Leave the field blank to keep the saved value, or tick "Remove saved value".
+* Robustness: if WooCommerce is inactive, tracking pauses with an admin notice instead of causing a fatal error on the front end.
+* Robustness: the nightly ACR job is unscheduled when ACR is turned off or the plugin is deactivated.
+* Robustness: the client IP must be a valid address; the Meta Graph API version can be overridden with the dxps_meta_api_version filter (default unchanged: v21.0).
+* Text: the Server relay description no longer claims date of birth and gender are sent (they never were).
 
 = 1.6.0 =
 * New "Direct Google mode" (Platforms tab -> Direct Google mode). With GTM switched off, DX now sends the same GA4 events and parameters as the Eynna GTM container (enriched engine: view_item, view_item_list, view_category, add_to_cart, page_scroll, contact_click, click, cta_click, form_start/error, time_on_page, purchase ...) and the eh_ads_* Google Ads events directly with gtag.

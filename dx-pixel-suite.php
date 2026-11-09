@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: First-party marketing tracking for WooCommerce. Meta Pixel + Conversions API, GA4 (gtag + Measurement Protocol), Google Ads + Enhanced Conversions, GTM dataLayer mode, Consent Mode v2 (toggle), status-based Purchase for COD, WhatsApp/phone/email lead events. Built for eynna-hair.ba by Digital X.
- * Version:     1.6.0
+ * Version:     1.6.1
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '1.6.0' );
+define( 'DXPS_VERSION', '1.6.1' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -65,8 +65,23 @@ register_activation_hook( __FILE__, function () {
 	update_option( 'dxps_settings', array_merge( $defaults, (array) $existing ) );
 } );
 
+// Remove the nightly ACR job on deactivation so it does not keep firing while the plugin is off.
+register_deactivation_hook( __FILE__, function () {
+	wp_clear_scheduled_hook( 'dxps_cron_acr' );
+} );
+
 add_action( 'plugins_loaded', function () {
 	DXPS_Settings::init();
+	// Tracking and server hooks call WooCommerce functions directly (is_shop(), wc_get_order() ...).
+	// Without WooCommerce they would fatal on every front-end request, so only the settings screen loads.
+	if ( ! class_exists( 'WooCommerce' ) ) {
+		add_action( 'admin_notices', function () {
+			if ( current_user_can( 'manage_options' ) ) {
+				echo '<div class="notice notice-error"><p><strong>DX Pixel Suite</strong> needs WooCommerce. Tracking is paused until WooCommerce is active.</p></div>';
+			}
+		} );
+		return;
+	}
 	DXPS_Tracking::init();
 	DXPS_Server::init();
 } );

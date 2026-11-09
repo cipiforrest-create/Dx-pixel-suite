@@ -28,6 +28,8 @@ class DXPS_Tracking {
 		// AddToCart (non-AJAX / loop adds) + RemoveFromCart -> session queue.
 		add_action( 'woocommerce_add_to_cart', array( __CLASS__, 'on_add_to_cart' ), 10, 6 );
 		add_action( 'woocommerce_cart_item_removed', array( __CLASS__, 'on_remove_from_cart' ), 10, 2 );
+		// AJAX add-to-cart buttons: expose the display price so the browser AddToCart / add_to_cart carries a value.
+		add_filter( 'woocommerce_loop_add_to_cart_args', array( __CLASS__, 'loop_price_attr' ), 10, 2 );
 
 		// Persist attribution + identity on the order at checkout.
 		add_action( 'woocommerce_checkout_create_order', array( __CLASS__, 'save_attribution' ), 10, 1 );
@@ -323,6 +325,18 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 	}
 
 	/* ---------- Cart hooks ---------- */
+
+	/** dxps-front.js reads data-dxps-price on added_to_cart; without it AJAX adds were sent with no value. */
+	public static function loop_price_attr( $args, $product ) {
+		if ( $product instanceof WC_Product ) {
+			$price = (float) wc_get_price_to_display( $product );
+			if ( $price >= 0 ) {
+				$args['attributes'] = isset( $args['attributes'] ) && is_array( $args['attributes'] ) ? $args['attributes'] : array();
+				$args['attributes']['data-dxps-price'] = wc_format_decimal( $price, wc_get_price_decimals() );
+			}
+		}
+		return $args;
+	}
 
 	public static function on_add_to_cart( $key, $product_id, $qty, $variation_id, $variation, $data ) {
 		if ( wp_doing_ajax() ) return; // AJAX adds handled in JS via added_to_cart.

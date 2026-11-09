@@ -274,13 +274,13 @@
 
 	/* ---------- custom events (settings: selector | event_name) ---------- */
 	(cfg.custom || []).forEach(function (ce) {
-		try {
-			document.addEventListener('click', function (ev) {
-				if (ev.target.closest && ev.target.closest(ce.sel)) {
-					window.dxpsFire({ name: ce.name, params: { trigger_selector: ce.sel } });
-				}
-			}, true);
-		} catch (e) {}
+		// Validate once: an invalid selector would otherwise throw inside the listener on every click.
+		try { document.querySelector(ce.sel); } catch (e) { return; }
+		document.addEventListener('click', function (ev) {
+			if (ev.target.closest && ev.target.closest(ce.sel)) {
+				window.dxpsFire({ name: ce.name, params: { trigger_selector: ce.sel } });
+			}
+		}, true);
 	});
 
 	/* ---------- Automatic Advanced Matching: detect customer fields in forms ----------

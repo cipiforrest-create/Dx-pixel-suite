@@ -3,6 +3,9 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 class DXPS_Settings {
 
+	/** Credentials: never echoed back into the admin HTML; a blank submission keeps the stored value. */
+	const SECRETS = array( 'meta_capi_token', 'ga4_api_secret' );
+
 	/** field => tab registry: text fields and checkbox fields per tab (prevents cross-tab wipes on save). */
 	private static $tabs = array(
 		'platforms' => array(
@@ -35,21 +38,41 @@ class DXPS_Settings {
 		if ( ! isset( self::$tabs[ $tab ] ) ) return;
 
 		$o = get_option( 'dxps_settings', array() );
-		foreach ( self::$tabs[ $tab ]['text'] as $k ) $o[ $k ] = isset( $_POST[ $k ] ) ? sanitize_text_field( wp_unslash( $_POST[ $k ] ) ) : '';
+		foreach ( self::$tabs[ $tab ]['text'] as $k ) {
+			$v = isset( $_POST[ $k ] ) ? wp_unslash( $_POST[ $k ] ) : '';
+			if ( in_array( $k, self::SECRETS, true ) ) {
+				// Blank = keep the stored credential (it is not rendered back into the form); explicit clear wipes it.
+				$v = trim( sanitize_text_field( $v ) );
+				if ( '' !== $v )                           $o[ $k ] = $v;
+				elseif ( isset( $_POST[ $k . '_clear' ] ) ) $o[ $k ] = '';
+				continue;
+			}
+			// custom_events is one rule per line; sanitize_text_field() would collapse all lines into one.
+			$o[ $k ] = 'custom_events' === $k ? sanitize_textarea_field( $v ) : sanitize_text_field( $v );
+		}
 		foreach ( self::$tabs[ $tab ]['bool'] as $k ) $o[ $k ] = isset( $_POST[ $k ] ) ? 1 : 0;
 		if ( 'events' === $tab ) {
 			$o['purchase_trigger'] = ( isset( $_POST['purchase_trigger'] ) && 'thankyou' === $_POST['purchase_trigger'] ) ? 'thankyou' : 'status';
 			$o['time_on_page']     = max( 5, min( 600, absint( $o['time_on_page'] ?: 30 ) ) );
+			// WooCommerce passes status slugs without the "wc-" prefix; "wc-completed" would never match.
+			$status = preg_replace( '/^wc-/', '', sanitize_key( $o['purchase_status'] ?? '' ) );
+			$o['purchase_status'] = '' !== $status ? $status : 'completed';
 		}
 		update_option( 'dxps_settings', $o );
-		add_action( 'admin_notices', function () {
-			echo '<div class="notice notice-success"><p>DX Pixel Suite settings saved.</p></div>';
-		} );
+		// Post/Redirect/Get: DXPS_Helpers::opt() caches the options for the request, so rendering the form in
+		// this same request would show (and on the next save, re-submit) the pre-save values.
+		wp_safe_redirect( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $tab . '&dxps_saved=1' ) );
+		exit;
 	}
 
 	private static function f( $key, $ph = '' ) {
-		$type = in_array( $key, array( 'meta_capi_token','ga4_api_secret' ), true ) ? 'password' : 'text';
-		echo '<input type="' . $type . '" autocomplete="off" class="regular-text" name="' . esc_attr( $key ) . '" value="' . esc_attr( DXPS_Helpers::opt( $key ) ) . '" placeholder="' . esc_attr( $ph ) . '">';
+		if ( in_array( $key, self::SECRETS, true ) ) {
+			$saved = '' !== (string) DXPS_Helpers::opt( $key );
+			echo '<input type="password" autocomplete="new-password" class="regular-text" name="' . esc_attr( $key ) . '" value="" placeholder="' . esc_attr( $saved ? 'Saved — leave blank to keep' : $ph ) . '">';
+			if ( $saved ) echo ' <label><input type="checkbox" name="' . esc_attr( $key ) . '_clear" value="1"> Remove saved value</label>';
+			return;
+		}
+		echo '<input type="text" autocomplete="off" class="regular-text" name="' . esc_attr( $key ) . '" value="' . esc_attr( DXPS_Helpers::opt( $key ) ) . '" placeholder="' . esc_attr( $ph ) . '">';
 	}
 
 	private static function c( $key, $label, $desc = '' ) {
@@ -64,6 +87,7 @@ class DXPS_Settings {
 			echo '<a class="nav-tab ' . ( $tab === $k ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $k ) ) . '">' . esc_html( $l ) . '</a>';
 		}
 		echo '</nav>';
+		if ( ! empty( $_GET['dxps_saved'] ) ) echo '<div class="notice notice-success is-dismissible"><p>DX Pixel Suite settings saved.</p></div>';
 		if ( 'recommended' === $tab ) { self::tab_recommended(); echo '</div>'; return; }
 
 		echo '<form method="post"><input type="hidden" name="dxps_tab" value="' . esc_attr( $tab ) . '">';
@@ -118,7 +142,7 @@ class DXPS_Settings {
 			<p class="description">Google Ads conversion always fires on the thank-you page regardless.</p></td></tr>';
 		echo '<tr><th>Order status</th><td>'; self::f( 'purchase_status', 'completed' ); echo '<p class="description">Slug without wc- prefix.</p></td></tr>';
 		echo '</table><h2>Events</h2><table class="form-table">';
-		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror browser events through Meta CAPI + GA4 MP', 'First-party, deduplicated by event_id — recovers ad-blocker/iOS losses. Every relayed event carries maximum hashed customer data (email, phone, name, city, state, ZIP, country, DOB, gender, external ID, Facebook Login ID when available) to lift Event Match Quality.' ); echo '</td></tr>';
+		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror browser events through Meta CAPI + GA4 MP', 'First-party, deduplicated by event_id — recovers ad-blocker/iOS losses. Relayed events carry the validated, hashed customer data that is actually available (email, phone, name, city, state, ZIP, country, external ID, Facebook Login ID). Date of birth and gender are never inferred or sent.' ); echo '</td></tr>';
 		echo '<tr><th>Leads</th><td>'; self::c( 'track_leads', 'WhatsApp / phone / email clicks → Lead' ); echo '</td></tr>';
 		echo '<tr><th>Search</th><td>'; self::c( 'track_search', 'Site search → Search' ); echo '</td></tr>';
 		echo '<tr><th>PageScroll</th><td>'; self::c( 'track_scroll', 'Scroll depth at 25 / 50 / 75 / 90% → PageScroll (Meta) + scroll (GA4)', 'Great for engaged-visitor custom audiences.' ); echo '</td></tr>';
