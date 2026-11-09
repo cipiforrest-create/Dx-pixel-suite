@@ -1,0 +1,15 @@
+DX Pixel Suite v1.6.0 — recovered source export
+Export date: 2026-11-01
+Site: https://eynna-hair.ba
+Plugin location: wp-content/plugins/dx-pixel-suite/
+
+This archive contains the 8 source files recovered through the authenticated WordPress connection.
+IMPORTANT: The read API automatically redacted values/expressions associated with credentials,
+cookies, tokens, and URL parameters. For usability, those expressions were reconstructed
+where possible, with all credential defaults set to empty strings. This is a SANITIZED,
+RECONSTRUCTED SOURCE EXPORT, not a byte-for-byte backup of the installed plugin.
+
+The PHP files have passed PHP syntax lint. Runtime functionality was NOT verified.
+Do not replace the live plugin without testing on a staging site and reviewing
+the reconstructed areas. Your saved WordPress plugin settings were not included.
+No modifications were made to the live WordPress site.
