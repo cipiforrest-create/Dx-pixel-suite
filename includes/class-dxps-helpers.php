@@ -10,9 +10,13 @@ class DXPS_Helpers {
 	// EEA + UK + CH: consent-mode-relevant regions.
 	const EEA = array( 'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IS','IT','LV','LI','LT','LU','MT','NL','NO','PL','PT','RO','SK','SI','ES','SE','GB','CH' );
 
+	/** Engagement switches that are ON by default. Used when the key was never written to the database. */
+	const FALLBACKS = array( 'track_scroll' => 1, 'track_time' => 1, 'track_clicks' => 1, 'time_on_page' => 30 );
+
 	public static function opt( $key, $default = '' ) {
 		static $o = null;
 		if ( null === $o ) $o = get_option( 'dxps_settings', array() );
+		if ( is_array( $o ) && $o && ! array_key_exists( $key, $o ) && isset( self::FALLBACKS[ $key ] ) ) return self::FALLBACKS[ $key ];
 		return isset( $o[ $key ] ) && '' !== $o[ $key ] ? $o[ $key ] : $default;
 	}
 
@@ -301,8 +305,12 @@ class DXPS_Helpers {
 	public static function fbp() { return self::valid_user_data( array( 'fbp' => $_COOKIE['_fbp'] ?? '' ) )['fbp'] ?? ''; }
 
 	public static function fbc() {
-		$v = $_COOKIE['_fbc'] ?? '';
-		if ( ! $v && ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $_GET['fbclid'] ) ) $v = 'fb.1.' . round( microtime( true ) * 1000 ) . '.' . $_GET['fbclid'];
+		$v = isset( $_COOKIE['_fbc'] ) && is_string( $_COOKIE['_fbc'] ) ? $_COOKIE['_fbc'] : '';
+		// A new ad click (a different fbclid) replaces the stored click ID - Meta attributes to the latest click.
+		if ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $_GET['fbclid'] ) ) {
+			$suffix = '.' . $_GET['fbclid'];
+			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.1.' . round( microtime( true ) * 1000 ) . $suffix;
+		}
 		return self::valid_user_data( array( 'fbc'=>$v ) )['fbc'] ?? '';
 	}
 
@@ -416,6 +424,82 @@ class DXPS_Helpers {
 
 	public static function event_id( $name ) {
 		return strtolower( $name ) . '.' . wp_generate_uuid4();
+	}
+
+	/* ---------------- 1.8.0: geo fill-in + content tracking ---------------- */
+
+	/**
+	 * Opt-in: hashed country (and optionally city / region / ZIP) from Cloudflare's visitor-location headers, used
+	 * only where the customer has not given that field. Approximate, and derived from the IP Meta already receives.
+	 */
+	public static function geo_hashes() {
+		$mode = (string) self::opt( 'geo_enrich' );
+		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
+		$raw = array();
+		$c = self::country();
+		if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
+		if ( 'full' === $mode ) {
+			foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
+				if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
+			}
+		}
+		return $raw ? self::matching_hashes( $raw ) : array();
+	}
+
+	/** Post types selected for content tracking. */
+	public static function content_types() {
+		return array_values( array_diff( array_filter( array_map( 'sanitize_key', explode( ',', (string) self::opt( 'content_types' ) ) ) ), array( 'product', 'attachment' ) ) );
+	}
+
+	private static function is_store_page() {
+		if ( ! function_exists( 'is_woocommerce' ) ) return false;
+		return is_woocommerce() || is_cart() || is_checkout() || is_account_page();
+	}
+
+	/**
+	 * Content context of the current page, or null: array( type, id, group ).
+	 * type: article (posts), page, service (service post types or pages under a configured service path), or the
+	 * post type key for other custom types.
+	 */
+	public static function content_context() {
+		static $done = false, $ctx = null;
+		if ( $done ) return $ctx;
+		$done = true;
+		$types = self::content_types();
+		if ( ! $types || ! is_singular() || self::is_store_page() ) return null;
+		$pt = (string) get_post_type();
+		if ( ! in_array( $pt, $types, true ) ) return null;
+		$type = 'post' === $pt ? 'article' : $pt;
+		if ( preg_match( '/servic|uslug|tretman|treatment/i', $pt ) ) $type = 'service';
+		if ( 'service' !== $type ) {
+			$path = '/' . trim( (string) wp_parse_url( isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '/', PHP_URL_PATH ), '/' );
+			foreach ( preg_split( '/\r?\n/', (string) self::opt( 'content_service_paths' ) ) as $line ) {
+				$line = trim( $line );
+				if ( '' === $line ) continue;
+				$prefix = '*' === substr( $line, -1 );
+				$want   = '/' . trim( $prefix ? substr( $line, 0, -1 ) : $line, '/' );
+				if ( $prefix ? 0 === strpos( $path . '/', rtrim( $want, '/' ) . '/' ) : $path === $want ) { $type = 'service'; break; }
+			}
+		}
+		$group = '';
+		if ( 'post' === $pt && function_exists( 'get_the_category' ) ) {
+			$cats = get_the_category();
+			if ( $cats && ! empty( $cats[0]->name ) ) $group = (string) $cats[0]->name;
+		}
+		$ctx = array( 'type' => $type, 'id' => (int) get_the_ID(), 'group' => $group );
+		return $ctx;
+	}
+
+	/**
+	 * Meta event names for content events. "standard" uses ViewContent / ViewCategory (best for sites without a
+	 * shop); "custom" keeps them apart from product events (ContentView / ContentList). auto = by WooCommerce.
+	 */
+	public static function content_meta_names() {
+		$mode = (string) self::opt( 'content_meta_event', 'auto' );
+		if ( 'standard' !== $mode && 'custom' !== $mode ) $mode = class_exists( 'WooCommerce' ) ? 'custom' : 'standard';
+		return 'standard' === $mode
+			? array( 'view_content' => 'ViewContent', 'view_content_list' => 'ViewCategory', 'content_engaged' => 'ContentEngaged' )
+			: array( 'view_content' => 'ContentView', 'view_content_list' => 'ContentList', 'content_engaged' => 'ContentEngaged' );
 	}
 
 	/* ---------------- 1.7.0: data quality ---------------- */

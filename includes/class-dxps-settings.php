@@ -13,8 +13,8 @@ class DXPS_Settings {
 			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu' ),
 		),
 		'events' => array(
-			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value' ),
-			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log' ),
+			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich' ),
+			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged' ),
 		),
 		'consent' => array(
 			'text' => array(),
@@ -54,7 +54,7 @@ class DXPS_Settings {
 				continue;
 			}
 			// custom_events is one rule per line; sanitize_text_field() would collapse all lines into one.
-			$o[ $k ] = in_array( $k, array( 'custom_events', 'url_identity' ), true ) ? sanitize_textarea_field( $v ) : sanitize_text_field( $v );
+			$o[ $k ] = in_array( $k, array( 'custom_events', 'url_identity', 'content_service_paths' ), true ) ? sanitize_textarea_field( $v ) : sanitize_text_field( $v );
 		}
 		foreach ( self::$tabs[ $tab ]['bool'] as $k ) $o[ $k ] = isset( $_POST[ $k ] ) ? 1 : 0;
 		if ( 'events' === $tab ) {
@@ -67,12 +67,35 @@ class DXPS_Settings {
 			$o['purchase_value']    = 'net' === ( $o['purchase_value'] ?? '' ) ? 'net' : 'total';
 			$o['exclude_roles']     = implode( ',', array_filter( array_map( 'sanitize_key', explode( ',', (string) ( $o['exclude_roles'] ?? '' ) ) ) ) );
 			if ( empty( $o['event_log'] ) ) delete_option( 'dxps_event_log' );
+			// 1.8.0 content tracking
+			$types = isset( $_POST['content_types'] ) && is_array( $_POST['content_types'] ) ? array_map( 'sanitize_key', wp_unslash( $_POST['content_types'] ) ) : array();
+			$o['content_types']       = implode( ',', array_slice( array_diff( array_filter( $types ), array( 'product', 'attachment' ) ), 0, 30 ) );
+			$o['content_meta_event']  = in_array( $o['content_meta_event'] ?? '', array( 'standard', 'custom' ), true ) ? $o['content_meta_event'] : 'auto';
+			$o['content_read_scroll'] = max( 10, min( 100, absint( $o['content_read_scroll'] ?: 50 ) ) );
+			$o['content_read_time']   = max( 5, min( 600, absint( $o['content_read_time'] ?: 30 ) ) );
+			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full' ), true ) ? $o['geo_enrich'] : '';
 		}
 		update_option( 'dxps_settings', $o );
 		// Post/Redirect/Get: DXPS_Helpers::opt() caches the options for the request, so rendering the form in
 		// this same request would show (and on the next save, re-submit) the pre-save values.
 		wp_safe_redirect( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $tab . '&dxps_saved=1' ) );
 		exit;
+	}
+
+	/** Another plugin sending to the same Meta pixel counts every shared event twice. */
+	private static function conflict_notice() {
+		$active = false;
+		foreach ( (array) get_option( 'active_plugins', array() ) as $pl ) {
+			if ( is_string( $pl ) && 0 === strpos( $pl, 'pixelyoursite' ) ) { $active = true; break; }
+		}
+		if ( ! $active && ! defined( 'PYS_FREE_VERSION' ) && ! defined( 'PYS_VERSION' ) ) return;
+		$ours  = (string) DXPS_Helpers::opt( 'meta_pixel_id' );
+		$pys   = get_option( 'pys_facebook', array() );
+		$theirs = is_array( $pys ) && isset( $pys['pixel_id'] ) ? array_map( 'strval', (array) $pys['pixel_id'] ) : array();
+		$same  = '' !== $ours && in_array( $ours, $theirs, true );
+		echo '<div class="notice notice-' . ( $same ? 'error' : 'warning' ) . '"><p><strong>PixelYourSite is active.</strong> '
+			. ( $same ? 'It is set to the same Meta pixel ID as DX Pixel Suite, so every event both plugins send is counted twice.' : 'If it sends to the same Meta pixel as DX Pixel Suite, every shared event is counted twice.' )
+			. ' Keep one plugin in charge of the Meta pixel: deactivate PixelYourSite, or remove its Meta pixel ID.</p></div>';
 	}
 
 	private static function f( $key, $ph = '' ) {
@@ -97,6 +120,7 @@ class DXPS_Settings {
 			echo '<a class="nav-tab ' . ( $tab === $k ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $k ) ) . '">' . esc_html( $l ) . '</a>';
 		}
 		echo '</nav>';
+		self::conflict_notice();
 		if ( ! empty( $_GET['dxps_saved'] ) ) echo '<div class="notice notice-success is-dismissible"><p>DX Pixel Suite settings saved.</p></div>';
 		if ( 'recommended' === $tab ) { self::tab_recommended(); echo '</div>'; return; }
 		if ( 'diagnostics' === $tab ) { self::tab_diagnostics(); echo '</div>'; return; }
@@ -183,6 +207,29 @@ class DXPS_Settings {
 		echo '<tr><th>URL parameters</th><td><textarea name="url_identity" class="large-text" rows="3" placeholder="email | em' . "\n" . 'phone | ph' . "\n" . 'name | name">' . esc_textarea( DXPS_Helpers::opt( 'url_identity' ) ) . '</textarea><p class="description">One per line: <code>url_parameter | field</code>. For email, SMS or booking links that arrive with customer details in the URL (for example <code>?email=…&amp;phone=…</code>). Fields: <code>em</code> <code>ph</code> <code>fn</code> <code>ln</code> <code>name</code> (full name) <code>ct</code> <code>st</code> <code>zp</code> <code>country</code>. Values are hashed in the browser and never sent as part of a page URL.</p></td></tr>';
 		echo '<tr><th>Phone numbers</th><td>'; self::c( 'phone_default_country', 'Assume the store country for phone numbers written without a country code', 'Meta only matches phone numbers that include a country code. Without this, local-format numbers from forms that have no country field are dropped.' ); echo '</td></tr>';
 		echo '<tr><th>Browser ID fallback</th><td>'; self::c( 'fbp_fallback', 'Create the _fbp browser ID cookie when Meta&#8217;s script is blocked', 'Ad blockers stop Meta&#8217;s script, so it never sets <code>_fbp</code> and server events lose that signal. DX then creates the cookie in Meta&#8217;s own format, after consent.' ); echo '</td></tr>';
+		echo '<tr><th>Location fill-in</th><td><select name="geo_enrich">';
+		foreach ( array( '' => 'Off (default)', 'country' => 'Country', 'full' => 'Country, city, region and ZIP' ) as $gk => $gl ) {
+			echo '<option value="' . esc_attr( $gk ) . '" ' . selected( (string) DXPS_Helpers::opt( 'geo_enrich' ), $gk, false ) . '>' . esc_html( $gl ) . '</option>';
+		}
+		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Anything the customer types always wins.</p></td></tr>';
+		echo '</table><h2>Content tracking (blog posts, pages, services)</h2><table class="form-table">';
+		echo '<tr><th>Track these content types</th><td>';
+		$chosen = DXPS_Helpers::content_types();
+		$pts    = function_exists( 'get_post_types' ) ? get_post_types( array( 'public' => true ), 'objects' ) : array();
+		foreach ( $pts as $pt ) {
+			if ( in_array( $pt->name, array( 'product', 'attachment' ), true ) ) continue;
+			$label = 'post' === $pt->name ? 'Blog posts' : ( 'page' === $pt->name ? 'Pages' : $pt->label . ' (' . $pt->name . ')' );
+			echo '<label style="display:block"><input type="checkbox" name="content_types[]" value="' . esc_attr( $pt->name ) . '" ' . checked( in_array( $pt->name, $chosen, true ), true, false ) . '> ' . esc_html( $label ) . '</label>';
+		}
+		echo '<p class="description">Each view of a selected item sends a content-view event with its ID and type (<code>article</code>, <code>page</code>, <code>service</code> or the post type). Titles and text are never sent to Meta. Works with or without WooCommerce; shop, cart and checkout pages are never counted as content.</p></td></tr>';
+		echo '<tr><th>Service pages</th><td><textarea name="content_service_paths" class="large-text code" rows="3" placeholder="/usluge/*' . "\n" . '/ugradnja-perike">' . esc_textarea( DXPS_Helpers::opt( 'content_service_paths' ) ) . '</textarea><p class="description">One path per line; end with <code>*</code> to include everything below it. Pages under these paths are sent with type <code>service</code>, so you can build audiences and custom conversions for people interested in a service. Post types whose name contains service / usluge / tretman are treated as services automatically. Tick &#8220;Pages&#8221; above for this to apply to pages.</p></td></tr>';
+		echo '<tr><th>Meta event</th><td><select name="content_meta_event">';
+		foreach ( array( 'auto' => 'Automatic (recommended)', 'standard' => 'ViewContent (standard event)', 'custom' => 'ContentView (custom event)' ) as $ck => $cl ) {
+			echo '<option value="' . esc_attr( $ck ) . '" ' . selected( DXPS_Helpers::opt( 'content_meta_event', 'auto' ), $ck, false ) . '>' . esc_html( $cl ) . '</option>';
+		}
+		echo '</select><p class="description">Automatic uses the standard <strong>ViewContent</strong> on a site without a shop, and the separate <strong>ContentView</strong> when WooCommerce is active, so article views do not mix with product views in your catalog ads and product audiences.</p></td></tr>';
+		echo '<tr><th>Archive pages</th><td>'; self::c( 'content_archives', 'Blog home, category, tag and archive pages → ViewCategory / ContentList' ); echo '</td></tr>';
+		echo '<tr><th>Engaged read</th><td>'; self::c( 'content_engaged', 'Fire ContentEngaged when a visitor scrolls' ); echo ' <input type="number" min="10" max="100" name="content_read_scroll" value="' . esc_attr( (int) DXPS_Helpers::opt( 'content_read_scroll', 50 ) ) . '" style="width:65px"> % <strong>and</strong> stays <input type="number" min="5" max="600" name="content_read_time" value="' . esc_attr( (int) DXPS_Helpers::opt( 'content_read_time', 30 ) ) . '" style="width:65px"> seconds<p class="description">One event per page view, with the content ID and type. This is the conversion signal for a site without a shop: use it for audiences (&#8220;read a service page&#8221;) or as a custom conversion in Meta filtered by <code>content_type</code>. Time counts only while the tab is visible.</p></td></tr>';
 		echo '</table><h2>Data quality</h2><table class="form-table">';
 		echo '<tr><th>Bots</th><td>'; self::c( 'block_bots', 'Do not track crawlers, uptime monitors and headless browsers', 'Checked in the browser and again on the server relay.' ); echo '</td></tr>';
 		echo '<tr><th>Excluded roles</th><td>'; self::f( 'exclude_roles', 'administrator, shop_manager' ); echo '<p class="description">Comma-separated role slugs. Logged-in users with these roles are not tracked, and their test orders are not sent as purchases.</p></td></tr>';
@@ -228,6 +275,20 @@ class DXPS_Settings {
 	private static function tab_diagnostics() {
 		$log = get_option( 'dxps_event_log', array() );
 		if ( ! is_array( $log ) ) $log = array();
+		echo '<h2>Event switches</h2><p>What DX is set to send right now. An event that stopped arriving in Events Manager is usually switched off here.</p><table class="widefat striped" style="max-width:720px"><thead><tr><th>Event in Events Manager</th><th>Setting</th><th>Status</th></tr></thead><tbody>';
+		$switches = array(
+			array( 'PageView + server relay', 'server_relay' ), array( 'PageScroll', 'track_scroll' ), array( 'TimeOnPage', 'track_time' ), array( 'InternalClick', 'track_clicks' ),
+			array( 'Lead (WhatsApp / phone / email)', 'track_leads' ), array( 'Lead (forms)', 'track_form_leads' ), array( 'Search', 'track_search' ), array( 'Form', 'track_forms' ),
+			array( 'Download', 'track_downloads' ), array( 'OutboundClick', 'track_outbound' ), array( 'ContentEngaged', 'content_engaged' ),
+		);
+		foreach ( $switches as $sw ) {
+			$on = DXPS_Helpers::on( $sw[1] );
+			echo '<tr><td>' . esc_html( $sw[0] ) . '</td><td><code>' . esc_html( $sw[1] ) . '</code></td><td>' . ( $on ? '<span style="color:#00a32a;font-weight:600">ON</span>' : '<span style="color:#d63638;font-weight:600">OFF</span>' ) . '</td></tr>';
+		}
+		$ct = DXPS_Helpers::content_types();
+		echo '<tr><td>Content views</td><td><code>content_types</code></td><td>' . ( $ct ? '<span style="color:#00a32a;font-weight:600">ON</span> (' . esc_html( implode( ', ', $ct ) ) . ')' : '<span style="color:#d63638;font-weight:600">OFF</span>' ) . '</td></tr>';
+		echo '<tr><td>Meta pixel</td><td><code>meta_enabled</code></td><td>' . ( DXPS_Helpers::on( 'meta_enabled' ) && DXPS_Helpers::opt( 'meta_pixel_id' ) ? '<span style="color:#00a32a;font-weight:600">ON</span>' : '<span style="color:#d63638;font-weight:600">OFF</span>' ) . '</td></tr>';
+		echo '</tbody></table>';
 		echo '<h2>Matching-field coverage</h2>';
 		if ( ! DXPS_Helpers::on( 'event_log' ) ) {
 			echo '<p>The event log is off. Turn on <strong>Event log</strong> on the Events &amp; Parameters tab, browse the shop and place a test order, then come back here.</p>';

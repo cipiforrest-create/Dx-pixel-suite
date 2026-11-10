@@ -1,8 +1,8 @@
 === DX Pixel Suite ===
-Version: 1.7.0
-Stable tag: 1.7.0
+Version: 1.8.0
+Stable tag: 1.8.0
 Requires PHP: 7.4
-WooCommerce required. HTTPS and a modern browser recommended.
+WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
 
 UPGRADING FROM 1.3.2
@@ -81,6 +81,35 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 1.8.0 =
+Content tracking (off until you tick content types on Events & Parameters)
+* Blog posts, pages, service pages and any public custom post type send a content-view event with the post ID and
+  a type (article, page, service or the post type). Titles and text are never sent to Meta.
+* Service pages: by URL path (/usluge/*) or automatically for post types named service / usluge / tretman.
+* Meta event: ViewContent on a site without a shop; ContentView when WooCommerce is active (keeps article views out
+  of product audiences). Can be forced either way.
+* Optional: archive pages (ViewCategory / ContentList) and ContentEngaged (scroll % AND visible time).
+* WooCommerce is now optional. Without it DX tracks page views, content, search, leads, forms and custom events.
+* Not included on purpose: AddToCart / Purchase on blog pages. Those are not real conversions.
+
+PageScroll, TimeOnPage, InternalClick
+* If these switches were never written to the database (plugin updated by upload, activation hook not run), they
+  now default to ON, and missing keys are filled in once after the update. Switches saved as OFF stay OFF:
+  check Diagnostics > Event switches.
+* TimeOnPage counts visible time only (no events from background tabs, none lost to throttled timers).
+* PageScroll also works when the theme scrolls an inner container, and is checked on load.
+* InternalClick treats www and non-www as the same site and no longer counts add-to-cart links.
+
+Matching
+* Click ID (fbc): a new Meta ad click now replaces the stored click ID (browser and server). Before, the first
+  click was kept for 90 days and later ad clicks were ignored.
+* Location fill-in (off by default): country, or country + city + region + ZIP, from Cloudflare visitor-location
+  headers on server events when the customer has not given an address. Approximate; customer data always wins.
+
+Diagnostics
+* Event switches table: what DX is set to send right now.
+* Warning on every DX tab when PixelYourSite is active, and an error when it uses the same Meta pixel ID.
 
 = 1.7.0 =
 Every new feature is OFF after upgrading. Nothing changes until you switch it on (Events & Parameters / Platforms tabs).

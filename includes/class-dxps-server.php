@@ -61,6 +61,7 @@ class DXPS_Server {
 	public static function acr_run() {
 		if ( ! DXPS_Helpers::on( 'acr_enabled' ) ) return;
 		$status = DXPS_Helpers::opt( 'purchase_status', 'completed' );
+		if ( ! function_exists( 'wc_get_orders' ) ) return;
 		$orders = wc_get_orders( array(
 			'status'       => 'wc-' . $status,
 			'date_created' => '>' . ( time() - 7 * DAY_IN_SECONDS ),
@@ -163,7 +164,7 @@ class DXPS_Server {
 		$url = DXPS_Helpers::safe_event_url( $url );
 		unset( $params['_dxps_marketing_allowed'], $params['_dxps_event_time'] );
 
-		$allowed = array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'purchase', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'login', 'sign_up', 'comment', 'outbound_click' );
+		$allowed = array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'purchase', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'login', 'sign_up', 'comment', 'outbound_click', 'view_content', 'view_content_list', 'content_engaged' );
 		foreach ( self::custom_event_names() as $ce ) $allowed[] = $ce;
 		if ( ! in_array( $name, $allowed, true ) || ! $event_id ) {
 			return new WP_REST_Response( array( 'ok' => false ), 400 );
@@ -175,7 +176,8 @@ class DXPS_Server {
 
 		if ( ! DXPS_Helpers::on( 'meta_enabled' ) && ! DXPS_Helpers::on( 'ga4_enabled' ) ) return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'disabled' ), 200 );
 
-		$user = array_merge( DXPS_Helpers::user_data_full(), array_filter( array(
+		// Geo fill-in (opt-in) goes first, so anything the customer actually gave overrides it.
+		$user = array_merge( DXPS_Helpers::geo_hashes(), DXPS_Helpers::user_data_full(), array_filter( array(
 			'client_ip_address' => self::ip(),
 			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
 			'fbp'               => DXPS_Helpers::fbp(),
@@ -223,6 +225,8 @@ class DXPS_Server {
 			'outbound_click'   => 'OutboundClick',
 		);
 		if ( isset( $map[ $ga4_name ] ) ) return $map[ $ga4_name ];
+		$content = DXPS_Helpers::content_meta_names();
+		if ( isset( $content[ $ga4_name ] ) ) return $content[ $ga4_name ];
 		// Custom rules named after a Meta standard event (Lead, Schedule, Contact ...) keep Meta's exact casing,
 		// which the browser pixel uses too - deduplication needs identical names on both sides.
 		return DXPS_Helpers::META_STANDARD[ $ga4_name ] ?? $ga4_name;
@@ -286,6 +290,13 @@ class DXPS_Server {
 			$contents[] = $item;
 		}
 		if ( $contents ) { $custom['content_type']='product'; $custom['contents']=$contents; $custom['content_ids']=array_column( $contents, 'id' ); $custom['num_items']=array_sum( array_column( $contents, 'quantity' ) ); }
+		// Content events (blog posts, pages, services): the post ID and a short type key, never titles or text.
+		if ( ! $contents && isset( $params['content_id'] ) && is_scalar( $params['content_id'] ) && preg_match( '/^[0-9]{1,12}$/', (string) $params['content_id'] ) ) {
+			$custom['content_ids'] = array( (string) $params['content_id'] );
+		}
+		if ( ! $contents && ! empty( $params['content_type'] ) && is_string( $params['content_type'] ) && preg_match( '/^[a-z0-9_\-]{1,40}$/', $params['content_type'] ) ) {
+			$custom['content_type'] = $params['content_type'];
+		}
 		if ( 'Purchase' === $event_name && ! empty( $params['transaction_id'] ) ) $custom['order_id'] = substr( sanitize_text_field( (string) $params['transaction_id'] ), 0, 100 );
 		// Deliberately no titles, query strings, search text, form text, health coupons or inferred demographics.
 		foreach ( array( 'percent_scrolled','time_on_page' ) as $k ) if ( isset( $params[ $k ] ) && is_numeric( $params[ $k ] ) && $params[ $k ] >= 0 ) $custom[ $k ] = min( 86400, (float) $params[ $k ] );
@@ -356,7 +367,7 @@ class DXPS_Server {
 		if ( ! empty( $params['coupon'] ) )         $p['coupon']         = $params['coupon'];
 		if ( ! empty( $params['search_term'] ) )    $p['search_term']    = $params['search_term'];
 		if ( ! empty( $params['item_list_name'] ) ) $p['item_list_name'] = $params['item_list_name'];
-		foreach ( array( 'page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'tags', 'user_role', 'traffic_source', 'plugin', 'landing_page', 'event_url', 'event_time', 'event_day', 'event_month', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'percent_scrolled', 'time_on_page', 'lead_type', 'link_url', 'link_text', 'form_id', 'form_action', 'file_name', 'file_extension', 'link_domain', 'brand', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'shipping_cost', 'fees', 'coupon_used', 'coupon_name', 'transactions_count', 'average_order', 'predicted_ltv', 'payment_method', 'new_customer' ) as $pk ) {
+		foreach ( array( 'page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'tags', 'user_role', 'traffic_source', 'plugin', 'landing_page', 'event_url', 'event_time', 'event_day', 'event_month', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'percent_scrolled', 'time_on_page', 'lead_type', 'link_url', 'link_text', 'form_id', 'form_action', 'file_name', 'file_extension', 'link_domain', 'content_type', 'content_id', 'content_group', 'brand', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'shipping_cost', 'fees', 'coupon_used', 'coupon_name', 'transactions_count', 'average_order', 'predicted_ltv', 'payment_method', 'new_customer' ) as $pk ) {
 			if ( isset( $params[ $pk ] ) && '' !== $params[ $pk ] && is_scalar( $params[ $pk ] ) ) $p[ $pk ] = $params[ $pk ];
 		}
 		if ( ! empty( $params['items'] ) ) {

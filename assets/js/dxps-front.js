@@ -40,8 +40,10 @@
 		if (Object.keys(keep).length && !getCookie('_dxps_src')) {
 			setCookie('_dxps_src', encodeURIComponent(JSON.stringify(keep)), 90);
 		}
-		if (q.get('fbclid') && !getCookie('_fbc')) {
-			setCookie('_fbc', 'fb.1.' + Date.now() + '.' + q.get('fbclid'), 90);
+		// A new ad click (different fbclid) replaces the stored click ID; the same click keeps its timestamp.
+		var fbclid = q.get('fbclid'), curFbc = getCookie('_fbc');
+		if (fbclid && /^[A-Za-z0-9_-]{6,400}$/.test(fbclid) && (!curFbc || curFbc.slice(-(fbclid.length + 1)) !== '.' + fbclid)) {
+			setCookie('_fbc', 'fb.1.' + Date.now() + '.' + fbclid, 90);
 		}
 	})();
 
@@ -71,6 +73,8 @@
 		outbound_click: 'OutboundClick'
 	};
 	var metaStandard = { ViewContent: 1, AddToCart: 1, InitiateCheckout: 1, AddToWishlist:1, AddPaymentInfo:1, Search: 1, Lead: 1, Purchase: 1, CompleteRegistration: 1 };
+	// 1.8.0 content events: names chosen in settings (ViewContent/ViewCategory or ContentView/ContentList).
+	Object.keys(cfg.contentMeta || {}).forEach(function (k) { metaMap[k] = cfg.contentMeta[k]; });
 	// Custom rules named after a Meta standard event (Lead, Schedule, Contact ...) are sent as that standard event.
 	(cfg.custom || []).forEach(function (ce) { if (ce.meta) { metaMap[ce.name] = ce.meta; metaStandard[ce.meta] = 1; } });
 
@@ -82,6 +86,11 @@
 			out.content_ids = p.items.map(function (i) { return i.id; });
 			out.contents = p.items.map(function (i) { return { id: i.id, quantity: i.quantity || 1, item_price: i.price || 0 }; });
 			// Catalog IDs and prices suffice; do not send descriptive product or condition text.
+		}
+		else if (p.content_id) {
+			// Blog post / page / service: post ID and a short type key only.
+			out.content_ids = [String(p.content_id)];
+			if (p.content_type) out.content_type = String(p.content_type);
 		}
 		// Free-text search terms are not sent to Meta.
 		if (p.transaction_id) out.order_id = p.transaction_id;
@@ -143,8 +152,9 @@
 		// ones fill whatever budget is left, in priority order.
 		var GA4_PARAM_LIMIT = 25;
 		var coreKeys = ['items', 'value', 'currency', 'transaction_id', 'coupon', 'search_term', 'item_list_name',
-			'lead_type', 'new_customer', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'payment_method'];
-		var extraKeys = ['page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'user_role',
+			'lead_type', 'new_customer', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'payment_method',
+			'content_type', 'content_id'];
+		var extraKeys = ['content_group', 'page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'user_role',
 			'traffic_source', 'landing_page', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
 			'percent_scrolled', 'time_on_page', 'link_url', 'link_text', 'form_id', 'form_action', 'file_name',
 			'file_extension', 'link_domain', 'brand', 'coupon_used', 'coupon_name', 'shipping_cost', 'fees', 'transactions_count',
@@ -215,27 +225,77 @@
 	document.addEventListener('change',function(ev){var el=ev.target;if(!el||!el.closest('form.checkout,.wc-block-checkout'))return;var n=el.name||'',event=n==='payment_method'?'add_payment_info':/^shipping_method/.test(n)?'add_shipping_info':'';if(!event||checkoutSeen[event]===el.value)return;checkoutSeen[event]=el.value;var e=(window.dxpsEvents||[]).find(function(e){return e.name==='begin_checkout'});window.dxpsFire({name:event,params:e?e.params:{}});},true);
 	$(document.body).on('added_to_wishlist',function(ev,button){var el=button&&button.jquery?button[0]:button;if(!el||!el.dataset||!el.dataset.productId)return;window.dxpsFire({name:'add_to_wishlist',params:{items:[{id:String(el.dataset.productId),quantity:1}]}});});
 
-	/* ---------- PageScroll: 25 / 50 / 75 / 90 ---------- */
-	if (cfg.scroll) {
-		var scrollFired = {};
-		window.addEventListener('scroll', function () {
-			var h = document.documentElement, max = h.scrollHeight - h.clientHeight;
-			if (max <= 0) return;
-			var pct = Math.round(100 * (window.pageYOffset || h.scrollTop) / max);
-			[25, 50, 75, 90].forEach(function (t) {
-				if (pct >= t && !scrollFired[t]) {
-					scrollFired[t] = 1;
-					window.dxpsFire({ name: 'scroll', params: { percent_scrolled: t } });
-				}
-			});
-		}, { passive: true });
+	/* ---------- shared engagement meters (1.8.0) ----------
+	   Scroll depth: the window, or a large scrolling container (themes and page builders that scroll an inner
+	   element never move the window). Also checked on load, for pages restored at a scroll position.
+	   Active time: counts only while the tab is visible, so a background tab does not fire and a throttled
+	   timer does not lose the event. */
+	var scrollWatch = [], maxScrollPct = 0;
+	function checkScroll(ev) {
+		var root = document.scrollingElement || document.documentElement, el = root, t = ev && ev.target;
+		if (t && t.nodeType === 1 && t !== root && t !== document.body) {
+			if (t.scrollHeight - t.clientHeight < window.innerHeight * 0.5) return; // small widget, not the page
+			el = t;
+		}
+		var max = el.scrollHeight - el.clientHeight;
+		if (max <= 0) return;
+		var top = el === root ? (window.pageYOffset || root.scrollTop) : el.scrollTop;
+		var pct = Math.min(100, Math.round(100 * top / max));
+		if (pct <= maxScrollPct) return;
+		maxScrollPct = pct;
+		scrollWatch.forEach(function (w) { if (!w.done && pct >= w.pct) { w.done = 1; w.cb(w.pct); } });
+	}
+	function onScrollDepth(pct, cb) {
+		if (!scrollWatch.length) {
+			window.addEventListener('scroll', checkScroll, { passive: true });
+			document.addEventListener('scroll', checkScroll, { passive: true, capture: true });
+			$(function () { setTimeout(checkScroll, 300); });
+		}
+		scrollWatch.push({ pct: pct, cb: cb, done: 0 });
+	}
+	var timeWatch = [], activeMs = 0, lastTick = 0;
+	function onActiveTime(seconds, cb) {
+		if (!timeWatch.length) {
+			lastTick = Date.now();
+			setInterval(function () {
+				var now = Date.now();
+				if (!document.hidden) activeMs += Math.min(now - lastTick, 2000);
+				lastTick = now;
+				timeWatch.forEach(function (w) { if (!w.done && activeMs >= w.s * 1000) { w.done = 1; w.cb(w.s); } });
+			}, 1000);
+		}
+		timeWatch.push({ s: seconds, cb: cb, done: 0 });
 	}
 
-	/* ---------- TimeOnPage ---------- */
+	/* ---------- PageScroll: 25 / 50 / 75 / 90 ---------- */
+	if (cfg.scroll) {
+		[25, 50, 75, 90].forEach(function (t) {
+			onScrollDepth(t, function () { window.dxpsFire({ name: 'scroll', params: { percent_scrolled: t } }); });
+		});
+	}
+
+	/* ---------- TimeOnPage (visible time) ---------- */
 	if (cfg.timeOnPage > 0) {
-		setTimeout(function () {
+		onActiveTime(cfg.timeOnPage, function () {
 			window.dxpsFire({ name: 'time_on_page', params: { time_on_page: cfg.timeOnPage } });
-		}, cfg.timeOnPage * 1000);
+		});
+	}
+
+	/* ---------- Engaged read (1.8.0): scrolled far enough AND stayed long enough on a content page ---------- */
+	if (cfg.content) {
+		var readState = { s: 0, t: 0, done: 0 };
+		var readCheck = function () {
+			if (readState.done || !readState.s || !readState.t) return;
+			readState.done = 1;
+			window.dxpsFire({ name: 'content_engaged', params: {
+				content_type: cfg.content.type, content_id: String(cfg.content.id),
+				percent_scrolled: cfg.content.scroll, time_on_page: cfg.content.time
+			} });
+		};
+		onScrollDepth(cfg.content.scroll, function () { readState.s = 1; readCheck(); });
+		onActiveTime(cfg.content.time, function () { readState.t = 1; readCheck(); });
+		// A page shorter than the screen cannot be scrolled: seeing all of it counts as the scroll part.
+		$(function () { setTimeout(function () { var r = document.scrollingElement || document.documentElement; if (r.scrollHeight - r.clientHeight <= 0) { readState.s = 1; readCheck(); } }, 500); });
 	}
 
 	/* ---------- Internal link clicks ---------- */
@@ -245,8 +305,10 @@
 			var a = ev.target.closest && ev.target.closest('a');
 			if (!a || !a.href || clickCount >= 15) return;
 			var isHttp = a.protocol === 'http:' || a.protocol === 'https:';
-			if (!isHttp || a.host !== location.host) return; // internal links only
+			var bare = function (h) { return String(h || '').replace(/^www\./, ''); };
+			if (!isHttp || bare(a.host) !== bare(location.host)) return; // internal links only (www. and bare host are the same site)
 			if (a.href === location.href || (a.hash && a.pathname === location.pathname)) return; // skip anchors
+			if (/[?&]add-to-cart=/.test(a.search) || (a.classList && a.classList.contains('add_to_cart_button'))) return; // counted as AddToCart
 			clickCount++;
 			window.dxpsFire({
 				name: 'internal_click',
@@ -327,10 +389,7 @@
 			var path = location.pathname.replace(/\/+$/, '') || '/';
 			if (prefix ? path.indexOf(want) === 0 : path === want) $(function () { once(); });
 		} else if (type === 'scroll') {
-			window.addEventListener('scroll', function () {
-				var h = document.documentElement, max = h.scrollHeight - h.clientHeight;
-				if (max > 0 && Math.round(100 * (window.pageYOffset || h.scrollTop) / max) >= arg) once({ percent_scrolled: arg });
-			}, { passive: true });
+			onScrollDepth(arg, function () { once({ percent_scrolled: arg }); });
 		} else if (type === 'hover') {
 			if (!validSel(arg)) return;
 			document.addEventListener('mouseover', function (ev) { if (ev.target.closest && ev.target.closest(arg)) once(); }, true);

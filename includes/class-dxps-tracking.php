@@ -49,9 +49,9 @@ class DXPS_Tracking {
 	 */
 	public static function capture_fbclid_early() {
 		if ( ! DXPS_Helpers::marketing_allowed() || DXPS_Helpers::sensitive_context( $_SERVER['REQUEST_URI'] ?? '/' ) ) return;
-		if ( ! empty( $_COOKIE['_fbc'] ) || empty( $_GET['fbclid'] ) || headers_sent() ) return;
-		$fbc = DXPS_Helpers::fbc();
-		if ( ! $fbc ) return;
+		if ( empty( $_GET['fbclid'] ) || headers_sent() ) return;
+		$fbc = DXPS_Helpers::fbc(); // keeps the cookie for the same click, new value for a new ad click
+		if ( ! $fbc || ( isset( $_COOKIE['_fbc'] ) && $_COOKIE['_fbc'] === $fbc ) ) return;
 		// 400 days is the hard ceiling modern browsers (Chrome/Edge) enforce on Set-Cookie
 		// Expires/Max-Age regardless of what's requested, so that's the real-world maximum.
 		setcookie( '_fbc', $fbc, array(
@@ -164,11 +164,13 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			}
 		}
 		$u   = wp_get_current_user();
+		$wc  = class_exists( 'WooCommerce' ); // optional since 1.8.0
+		$content = DXPS_Helpers::content_context();
 		$ctx = array_filter( array(
 			'page_title'     => wp_get_document_title(),
-			'post_type'      => is_singular() ? get_post_type() : ( is_product_category() ? 'product_cat' : ( is_shop() ? 'shop' : '' ) ),
+			'post_type'      => is_singular() ? get_post_type() : ( $wc && is_product_category() ? 'product_cat' : ( $wc && is_shop() ? 'shop' : '' ) ),
 			'post_id'        => is_singular() ? get_the_ID() : 0,
-			'post_category'  => is_singular( 'product' ) ? implode( ', ', wc_get_product_terms( get_the_ID(), 'product_cat', array( 'fields' => 'names' ) ) ) : '',
+			'post_category'  => ( $wc && is_singular( 'product' ) ) ? implode( ', ', wc_get_product_terms( get_the_ID(), 'product_cat', array( 'fields' => 'names' ) ) ) : '',
 			'user_role'      => ( $u && $u->exists() && $u->roles ) ? $u->roles[0] : 'guest',
 			'traffic_source' => DXPS_Helpers::traffic_source(),
 			'plugin'         => 'DXPixelSuite',
@@ -202,6 +204,13 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,
 			'formLeads'   => DXPS_Helpers::on( 'track_form_leads' ) ? 1 : 0,
 			'outbound'    => DXPS_Helpers::on( 'track_outbound' ) ? 1 : 0,
+			// ---- 1.8.0: content tracking (blog posts, pages, services) ----
+			'contentMeta' => DXPS_Helpers::content_meta_names(),
+			'content'     => ( $content && DXPS_Helpers::on( 'content_engaged' ) ) ? array(
+				'type'   => $content['type'], 'id' => $content['id'],
+				'scroll' => max( 10, min( 100, (int) DXPS_Helpers::opt( 'content_read_scroll', 50 ) ) ),
+				'time'   => max( 5, min( 600, (int) DXPS_Helpers::opt( 'content_read_time', 30 ) ) ),
+			) : null,
 			'userIngest'=> ( DXPS_Helpers::on( 'auto_am' ) && DXPS_Helpers::on( 'server_relay' ) && ( $meta || $ga4 ) ) ? esc_url_raw( rest_url( 'dxps/v1/u' ) ) : '',
 		);
 		echo '<script>window.dxpsCfg=' . wp_json_encode( $cfg ) . ";</script>\n";
@@ -244,7 +253,41 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 	/* ============================ EVENTS ============================ */
 
 	public static function footer_events() {
-		if ( ! function_exists( 'WC' ) || self::off() ) return;
+		if ( self::off() ) return;
+		$events = function_exists( 'WC' ) ? self::store_events() : array();
+
+		// Site search on sites without a shop (the store branch covers it otherwise).
+		if ( ! function_exists( 'WC' ) && is_search() && DXPS_Helpers::on( 'track_search' ) ) {
+			$events[] = array( 'name' => 'search', 'params' => array( 'search_term' => get_search_query() ), 'event_id' => DXPS_Helpers::event_id( 'search' ) );
+		}
+
+		// 1.8.0: content tracking - blog posts, pages, service pages and other selected post types.
+		$content = DXPS_Helpers::content_context();
+		if ( $content ) {
+			$events[] = array( 'name' => 'view_content', 'params' => array_filter( array(
+				'content_type' => $content['type'], 'content_id' => (string) $content['id'], 'content_group' => $content['group'],
+			) ), 'event_id' => DXPS_Helpers::event_id( 'view_content' ) );
+		} elseif ( DXPS_Helpers::on( 'content_archives' ) && DXPS_Helpers::content_types() && ! is_singular() && ! is_search() ) {
+			$types = DXPS_Helpers::content_types();
+			$blog  = in_array( 'post', $types, true ) && ( is_home() || is_category() || is_tag() );
+			if ( $blog || is_post_type_archive( $types ) ) {
+				$events[] = array( 'name' => 'view_content_list', 'params' => array_filter( array(
+					'content_type'  => $blog ? 'article' : (string) get_query_var( 'post_type' ),
+					'content_group' => is_home() ? 'Blog' : (string) wp_strip_all_tags( get_the_archive_title() ),
+				) ), 'event_id' => DXPS_Helpers::event_id( 'view_content_list' ) );
+			}
+		}
+
+		if ( $events ) {
+			foreach ( $events as $k => $event ) {
+				if ( in_array( $event['name'], array( 'view_item','view_item_list','search','view_content','view_content_list' ), true ) ) $events[ $k ]['_dxps_cacheable'] = true;
+			}
+			echo '<script>window.dxpsEvents=' . wp_json_encode( $events ) . ';if(window.dxpsFire){window.dxpsEvents.forEach(window.dxpsFire);}</script>' . "\n";
+		}
+	}
+
+	/** WooCommerce page events (only called when WooCommerce is active). */
+	private static function store_events() {
 		$events = array();
 
 		// Session-queued events (add/remove cart from previous request).
@@ -279,13 +322,7 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			$purchase = self::purchase_event();
 			if ( $purchase ) $events[] = $purchase;
 		}
-
-		if ( $events ) {
-			foreach ( $events as $k => $event ) {
-				if ( in_array( $event['name'], array( 'view_item','view_item_list','search' ), true ) ) $events[ $k ]['_dxps_cacheable'] = true;
-			}
-			echo '<script>window.dxpsEvents=' . wp_json_encode( $events ) . ';if(window.dxpsFire){window.dxpsEvents.forEach(window.dxpsFire);}</script>' . "\n";
-		}
+		return $events;
 	}
 
 	private static function cart_params() {
