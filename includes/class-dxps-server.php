@@ -94,6 +94,7 @@ class DXPS_Server {
 		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
 		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
 		if ( ! $host || $host !== $site ) return false;
+		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) return false;
 		$ip   = self::ip();
 		$rate = (int) get_transient( 'dxps_rl_' . md5( $ip ) );
 		if ( $rate >= 120 ) return false;
@@ -150,6 +151,9 @@ class DXPS_Server {
 		if ( ! DXPS_Helpers::marketing_allowed() ) {
 			return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'consent' ), 200 );
 		}
+		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) {
+			return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'bot' ), 200 );
+		}
 
 		$name     = sanitize_text_field( $req->get_param( 'name' ) );
 		$event_id = sanitize_text_field( $req->get_param( 'event_id' ) );
@@ -159,7 +163,7 @@ class DXPS_Server {
 		$url = DXPS_Helpers::safe_event_url( $url );
 		unset( $params['_dxps_marketing_allowed'], $params['_dxps_event_time'] );
 
-		$allowed = array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'purchase', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'login', 'sign_up', 'comment' );
+		$allowed = array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'purchase', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'login', 'sign_up', 'comment', 'outbound_click' );
 		foreach ( self::custom_event_names() as $ce ) $allowed[] = $ce;
 		if ( ! in_array( $name, $allowed, true ) || ! $event_id ) {
 			return new WP_REST_Response( array( 'ok' => false ), 400 );
@@ -176,7 +180,7 @@ class DXPS_Server {
 			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
 			'fbp'               => DXPS_Helpers::fbp(),
 			'fbc'               => DXPS_Helpers::fbc(),
-			'external_id'       => DXPS_Helpers::external_id(),
+			'external_id'       => DXPS_Helpers::external_ids(),
 		) ) );
 
 		$meta = self::send_meta( self::meta_event_name( $name ), $params, $event_id, $user, $url );
@@ -216,18 +220,17 @@ class DXPS_Server {
 			'login'            => 'Login',
 			'sign_up'          => 'CompleteRegistration',
 			'comment'          => 'Comment',
+			'outbound_click'   => 'OutboundClick',
 		);
-		return isset( $map[ $ga4_name ] ) ? $map[ $ga4_name ] : $ga4_name;
+		if ( isset( $map[ $ga4_name ] ) ) return $map[ $ga4_name ];
+		// Custom rules named after a Meta standard event (Lead, Schedule, Contact ...) keep Meta's exact casing,
+		// which the browser pixel uses too - deduplication needs identical names on both sides.
+		return DXPS_Helpers::META_STANDARD[ $ga4_name ] ?? $ga4_name;
 	}
 
-	/** Custom events configured in settings (lines: css-selector | event_name). */
+	/** Names of the custom events configured in settings. */
 	public static function custom_event_names() {
-		$out = array();
-		foreach ( preg_split( '/\r?\n/', (string) DXPS_Helpers::opt( 'custom_events' ) ) as $line ) {
-			$parts = array_map( 'trim', explode( '|', $line ) );
-			if ( count( $parts ) >= 2 && preg_match( '/^[a-zA-Z0-9_]{2,40}$/', $parts[1] ) ) $out[] = strtolower( $parts[1] );
-		}
-		return $out;
+		return array_values( array_unique( array_column( DXPS_Helpers::custom_events(), 'name' ) ) );
 	}
 
 	/* ============================ META CAPI ============================ */
@@ -286,7 +289,7 @@ class DXPS_Server {
 		if ( 'Purchase' === $event_name && ! empty( $params['transaction_id'] ) ) $custom['order_id'] = substr( sanitize_text_field( (string) $params['transaction_id'] ), 0, 100 );
 		// Deliberately no titles, query strings, search text, form text, health coupons or inferred demographics.
 		foreach ( array( 'percent_scrolled','time_on_page' ) as $k ) if ( isset( $params[ $k ] ) && is_numeric( $params[ $k ] ) && $params[ $k ] >= 0 ) $custom[ $k ] = min( 86400, (float) $params[ $k ] );
-		if ( ! empty( $params['lead_type'] ) && in_array( $params['lead_type'], array( 'phone','email','whatsapp','booking' ), true ) ) $custom['lead_type'] = $params['lead_type'];
+		if ( ! empty( $params['lead_type'] ) && in_array( $params['lead_type'], array( 'phone','email','whatsapp','booking','form' ), true ) ) $custom['lead_type'] = $params['lead_type'];
 
 		$event = array(
 			'event_name'       => $event_name,
@@ -297,6 +300,13 @@ class DXPS_Server {
 			'user_data'        => $user_data,
 			'custom_data'      => $custom,
 		);
+
+		if ( DXPS_Helpers::on( 'meta_ldu' ) ) {
+			// Limited Data Use: Meta geolocates the event and applies the US-state rules where they apply.
+			$event['data_processing_options']         = array( 'LDU' );
+			$event['data_processing_options_country'] = 0;
+			$event['data_processing_options_state']   = 0;
+		}
 
 		$body = array( 'data' => array( $event ) );
 		if ( $diagnostic ) $body['test_event_code'] = $test_code;
@@ -319,6 +329,7 @@ class DXPS_Server {
 		}
 		// Never log the access-token URL, raw API body, or customer data.
 		DXPS_Helpers::log( 'CAPI ' . $event_name, $result + array( 'user_data_fields'=>array_keys( $user_data ), 'custom_data_fields'=>array_keys( $custom ) ) );
+		if ( ! $diagnostic ) DXPS_Helpers::log_event( array( 'e' => $event_name, 'ok' => $result['ok'] ? 1 : 0, 's' => $result['status'], 'f' => array_keys( $user_data ), 'v' => isset( $custom['value'] ) ? 1 : 0 ) );
 		return $result;
 	}
 
@@ -345,7 +356,7 @@ class DXPS_Server {
 		if ( ! empty( $params['coupon'] ) )         $p['coupon']         = $params['coupon'];
 		if ( ! empty( $params['search_term'] ) )    $p['search_term']    = $params['search_term'];
 		if ( ! empty( $params['item_list_name'] ) ) $p['item_list_name'] = $params['item_list_name'];
-		foreach ( array( 'page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'tags', 'user_role', 'traffic_source', 'plugin', 'landing_page', 'event_url', 'event_time', 'event_day', 'event_month', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'percent_scrolled', 'time_on_page', 'lead_type', 'link_url', 'link_text', 'form_id', 'form_action', 'file_name', 'file_extension', 'brand', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'shipping_cost', 'fees', 'coupon_used', 'coupon_name', 'transactions_count', 'average_order', 'predicted_ltv', 'payment_method', 'new_customer' ) as $pk ) {
+		foreach ( array( 'page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'tags', 'user_role', 'traffic_source', 'plugin', 'landing_page', 'event_url', 'event_time', 'event_day', 'event_month', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'percent_scrolled', 'time_on_page', 'lead_type', 'link_url', 'link_text', 'form_id', 'form_action', 'file_name', 'file_extension', 'link_domain', 'brand', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'shipping_cost', 'fees', 'coupon_used', 'coupon_name', 'transactions_count', 'average_order', 'predicted_ltv', 'payment_method', 'new_customer' ) as $pk ) {
 			if ( isset( $params[ $pk ] ) && '' !== $params[ $pk ] && is_scalar( $params[ $pk ] ) ) $p[ $pk ] = $params[ $pk ];
 		}
 		if ( ! empty( $params['items'] ) ) {
@@ -411,7 +422,7 @@ class DXPS_Server {
 		$event_id = 'purchase.' . $order_id; // matches the browser Google-Ads-scope event id.
 		$params   = array_merge( array(
 			'transaction_id' => (string) $order->get_order_number(),
-			'value'          => (float) $order->get_total(),
+			'value'          => DXPS_Helpers::order_value( $order ),
 			'currency'       => $order->get_currency(),
 			'items'          => DXPS_Helpers::order_items( $order ),
 			'coupon'         => implode( ',', DXPS_Helpers::safe_coupons( $order ) ),
@@ -419,12 +430,14 @@ class DXPS_Server {
 		), DXPS_Helpers::order_extras( $order ) );
 
 		// Meta CAPI with the attribution snapshot saved at checkout.
-		$user = array_merge( DXPS_Helpers::user_data_from_order( $order ), array_filter( array(
+		$from_order = DXPS_Helpers::user_data_from_order( $order );
+		$user = array_merge( $from_order, array_filter( array(
 			'client_ip_address' => $order->get_meta( '_dxps_ip' ),
 			'client_user_agent' => $order->get_meta( '_dxps_ua' ),
 			'fbp'               => $order->get_meta( '_dxps_fbp' ),
 			'fbc'               => $order->get_meta( '_dxps_fbc' ),
-			'external_id'       => $order->get_meta( '_dxps_eid' ),
+			// Browser ID saved at checkout plus the account ID: both identify the same buyer.
+			'external_id'       => array_values( array_filter( array( $order->get_meta( '_dxps_eid' ), $from_order['external_id'] ?? '' ) ) ),
 		) ) );
 		$params['_dxps_marketing_allowed'] = true;
 		$params['_dxps_event_time'] = $event_time;

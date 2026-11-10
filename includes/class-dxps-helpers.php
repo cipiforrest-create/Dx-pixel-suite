@@ -84,12 +84,23 @@ class DXPS_Helpers {
 		$p = preg_replace( '/\D/', '', $raw );
 		$prefix = array( 'BA'=>'387','RS'=>'381','HR'=>'385','SI'=>'386','DE'=>'49','AT'=>'43','CH'=>'41','ME'=>'382','MK'=>'389','GB'=>'44','US'=>'1','CA'=>'1','FR'=>'33','IT'=>'39','NL'=>'31','SE'=>'46' );
 		$cc = $prefix[ strtoupper( $country ) ] ?? '';
+		// 1.7.0 (opt-in): a local-format number with no country on the form is assumed to be in the store's country.
+		if ( ! $cc && self::on( 'phone_default_country' ) ) $cc = $prefix[ self::default_country() ] ?? '';
 		if ( strpos( $raw, '00' ) === 0 ) $p = substr( $p, 2 );
 		elseif ( strpos( $raw, '+' ) !== 0 ) {
 			if ( ! $cc ) return '';
 			if ( strpos( $p, $cc ) !== 0 ) $p = $cc . ltrim( $p, '0' );
 		}
 		return preg_match( '/^[1-9][0-9]{7,14}$/', $p ) ? '+' . $p : '';
+	}
+
+	/** Store base country (ISO-2, upper case) - used only by the opt-in phone fallback. */
+	public static function default_country() {
+		if ( function_exists( 'wc_get_base_location' ) ) {
+			$loc = wc_get_base_location();
+			if ( ! empty( $loc['country'] ) ) return strtoupper( $loc['country'] );
+		}
+		return '';
 	}
 
 	public static function matching_value( $key, $value, $country = '' ) {
@@ -142,8 +153,13 @@ class DXPS_Helpers {
 		if ( filter_var( $ip, FILTER_VALIDATE_IP ) ) $out['client_ip_address'] = $ip;
 		$ua = $data['client_user_agent'] ?? '';
 		if ( is_string( $ua ) && $ua ) $out['client_user_agent'] = substr( sanitize_text_field( $ua ), 0, 500 );
-		$eid = $data['external_id'] ?? '';
-		if ( is_string( $eid ) && preg_match( '/^[a-f0-9]{32,64}$/i', $eid ) ) $out['external_id'] = strtolower( $eid );
+		// Meta accepts several external IDs for one person (e.g. the browser ID and the account ID).
+		$eids = array();
+		foreach ( (array) ( $data['external_id'] ?? array() ) as $eid ) {
+			if ( is_string( $eid ) && preg_match( '/^[a-f0-9]{32,64}$/i', $eid ) ) $eids[ strtolower( $eid ) ] = 1;
+		}
+		$eids = array_slice( array_keys( $eids ), 0, 3 );
+		if ( $eids ) $out['external_id'] = 1 === count( $eids ) ? $eids[0] : $eids;
 		$fb = $data['fb_login_id'] ?? '';
 		if ( is_string( $fb ) && preg_match( '/^[0-9]{5,50}$/', $fb ) ) $out['fb_login_id'] = $fb;
 		return $out;
@@ -233,6 +249,22 @@ class DXPS_Helpers {
 		return is_user_logged_in() ? hash( 'sha256', 'dxps.user.' . get_current_user_id() ) : '';
 	}
 
+	/** Every external ID known for this visitor: browser ID cookie plus, when logged in, the account ID. */
+	public static function external_ids() {
+		$ids = array();
+		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
+			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = strtolower( $_COOKIE[ $c ] ); break; }
+		}
+		if ( is_user_logged_in() ) $ids[] = hash( 'sha256', 'dxps.user.' . get_current_user_id() );
+		return array_values( array_unique( $ids ) );
+	}
+
+	/** How long hashed matching data is remembered per browser ID. Default 10 minutes; opt-in up to 180 days. */
+	public static function retention() {
+		$days = max( 0, min( 180, (int) self::opt( 'am_retention_days', 0 ) ) );
+		return $days ? $days * DAY_IN_SECONDS : 10 * MINUTE_IN_SECONDS;
+	}
+
 	/**
 	 * WP-transient storage for external_id -> hashed customer data (10 minutes,
 	 * auto-expiring row in the database). Lets guests keep full Advanced
@@ -243,7 +275,9 @@ class DXPS_Helpers {
 		$eid = self::external_id();
 		if ( ! self::marketing_allowed() || ! $eid || ! $data ) return;
 		$data = self::valid_user_data( $data );
-		set_transient( 'dxps_eid_' . substr( $eid, 0, 32 ), $data, 10 * MINUTE_IN_SECONDS );
+		unset( $data['client_ip_address'], $data['client_user_agent'], $data['fbp'], $data['fbc'], $data['external_id'] ); // matching hashes only
+		if ( ! $data ) return;
+		set_transient( 'dxps_eid_' . substr( $eid, 0, 32 ), $data, self::retention() );
 	}
 
 	public static function recalled_user_data() {
@@ -363,6 +397,7 @@ class DXPS_Helpers {
 	/* ---------------- Per-pageload event queue (session) ---------------- */
 
 	public static function queue_event( $name, $params ) {
+		if ( self::excluded_role() ) return;
 		if ( function_exists( 'WC' ) && WC()->session ) {
 			$q   = WC()->session->get( 'dxps_queue', array() );
 			$q[] = array( 'name' => $name, 'params' => $params, 'event_id' => self::event_id( $name ) );
@@ -381,6 +416,94 @@ class DXPS_Helpers {
 
 	public static function event_id( $name ) {
 		return strtolower( $name ) . '.' . wp_generate_uuid4();
+	}
+
+	/* ---------------- 1.7.0: data quality ---------------- */
+
+	/** Known crawlers, monitors and headless browsers. Used only when "Block bots" is on. */
+	public static function is_bot( $ua = null ) {
+		if ( null === $ua ) $ua = isset( $_SERVER['HTTP_USER_AGENT'] ) ? (string) $_SERVER['HTTP_USER_AGENT'] : '';
+		if ( '' === trim( $ua ) ) return true;
+		return (bool) preg_match( '~bot[/;]|adsbot|crawl|spider|slurp|headless|lighthouse|pagespeed|gtmetrix|pingdom|uptimerobot|statuscake|facebookexternalhit|facebookcatalog|scrape|curl/|wget|python-requests|phantomjs|ahrefs|semrush|bytespider~i', $ua );
+	}
+
+	/** True when the logged-in user has a role excluded from tracking (staff, test accounts). */
+	public static function excluded_role() {
+		$roles = array_filter( array_map( 'sanitize_key', explode( ',', (string) self::opt( 'exclude_roles' ) ) ) );
+		if ( ! $roles || ! is_user_logged_in() ) return false;
+		$u = wp_get_current_user();
+		return $u && array_intersect( $roles, (array) $u->roles ) ? true : false;
+	}
+
+	/** Purchase value: order total, or (opt-in) the total without tax and shipping. */
+	public static function order_value( $order ) {
+		$total = (float) $order->get_total();
+		if ( 'net' !== self::opt( 'purchase_value', 'total' ) ) return $total;
+		return round( max( 0, $total - (float) $order->get_total_tax() - (float) $order->get_shipping_total() ), 2 );
+	}
+
+	/** Meta standard events a custom rule may name (case-insensitive in settings). */
+	const META_STANDARD = array( 'lead'=>'Lead', 'contact'=>'Contact', 'schedule'=>'Schedule', 'subscribe'=>'Subscribe', 'starttrial'=>'StartTrial', 'submitapplication'=>'SubmitApplication', 'completeregistration'=>'CompleteRegistration', 'findlocation'=>'FindLocation', 'customizeproduct'=>'CustomizeProduct', 'donate'=>'Donate', 'viewcontent'=>'ViewContent', 'addtowishlist'=>'AddToWishlist' );
+
+	/**
+	 * Custom event rules. One per line:  trigger | event_name | options
+	 *   trigger : a CSS selector (click), or click:<sel>, url:<path or path*>, scroll:<percent>, hover:<sel>,
+	 *             submit:<form sel>, visits:<n>, copy
+	 *   options : value=79, currency=EUR, value_param=amount, block=30 (minutes), need_fbc=1, device=mobile|desktop
+	 */
+	public static function custom_events() {
+		static $cache = null;
+		if ( null !== $cache ) return $cache;
+		$cache = array();
+		foreach ( preg_split( '/\r?\n/', (string) self::opt( 'custom_events' ) ) as $line ) {
+			$parts = array_map( 'trim', explode( '|', $line ) );
+			if ( count( $parts ) < 2 || '' === $parts[0] || ! preg_match( '/^[a-zA-Z0-9_]{2,40}$/', $parts[1] ) ) continue;
+			$type = 'click'; $arg = $parts[0];
+			if ( 'copy' === strtolower( $arg ) ) { $type = 'copy'; $arg = ''; }
+			elseif ( preg_match( '/^(click|url|scroll|hover|submit|visits):\s*(.+)$/i', $arg, $m ) ) { $type = strtolower( $m[1] ); $arg = trim( $m[2] ); }
+			if ( in_array( $type, array( 'scroll', 'visits' ), true ) ) {
+				$arg = (int) $arg;
+				if ( $arg < 1 || ( 'scroll' === $type && $arg > 100 ) ) continue;
+			}
+			$name = strtolower( $parts[1] );
+			$opts = array();
+			foreach ( preg_split( '/[\s,]+/', (string) ( $parts[2] ?? '' ), -1, PREG_SPLIT_NO_EMPTY ) as $kv ) {
+				$kv = explode( '=', $kv, 2 ); $k = strtolower( $kv[0] ); $v = $kv[1] ?? '1';
+				if ( 'value' === $k && is_numeric( $v ) && $v >= 0 )                         $opts['value'] = (float) $v;
+				elseif ( 'currency' === $k && preg_match( '/^[A-Za-z]{3}$/', $v ) )          $opts['currency'] = strtoupper( $v );
+				elseif ( 'value_param' === $k && preg_match( '/^[A-Za-z0-9_\-]{1,40}$/', $v ) ) $opts['value_param'] = $v;
+				elseif ( 'block' === $k && (int) $v > 0 )                                    $opts['block'] = min( 43200, (int) $v );
+				elseif ( 'need_fbc' === $k && $v )                                           $opts['need_fbc'] = 1;
+				elseif ( 'device' === $k && in_array( strtolower( $v ), array( 'mobile', 'desktop' ), true ) ) $opts['device'] = strtolower( $v );
+			}
+			$cache[] = array( 'type' => $type, 'arg' => $arg, 'name' => $name, 'meta' => self::META_STANDARD[ $name ] ?? '', 'opts' => $opts );
+		}
+		return $cache;
+	}
+
+	/** URL-parameter identity map (opt-in). Lines: url_parameter | field (em, ph, fn, ln, name, ct, st, zp, country). */
+	public static function url_identity() {
+		$out = array();
+		foreach ( preg_split( '/\r?\n/', (string) self::opt( 'url_identity' ) ) as $line ) {
+			$parts = array_map( 'trim', explode( '|', $line ) );
+			if ( 2 === count( $parts ) && preg_match( '/^[A-Za-z0-9_\-]{1,40}$/', $parts[0] ) && in_array( strtolower( $parts[1] ), array( 'em','ph','fn','ln','name','ct','st','zp','country' ), true ) ) {
+				$out[] = array( $parts[0], strtolower( $parts[1] ) );
+			}
+		}
+		return array_slice( $out, 0, 20 );
+	}
+
+	/**
+	 * Diagnostics ring buffer (opt-in): which server events were sent and which matching FIELDS they carried.
+	 * Field names only - never values, hashes, IPs or tokens.
+	 */
+	public static function log_event( $entry ) {
+		if ( ! self::on( 'event_log' ) ) return;
+		$log = get_option( 'dxps_event_log', array() );
+		if ( ! is_array( $log ) ) $log = array();
+		$log[] = array( 't' => time() ) + $entry;
+		if ( count( $log ) > 200 ) $log = array_slice( $log, -200 );
+		update_option( 'dxps_event_log', $log, false );
 	}
 
 	/* ---------------- Logging ---------------- */

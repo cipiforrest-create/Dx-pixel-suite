@@ -65,7 +65,19 @@ class DXPS_Tracking {
 		$_COOKIE['_fbc'] = $fbc; // usable immediately within this same request
 	}
 
+	/** 1.7.0: staff / test roles excluded from tracking. Decided once per request. */
+	private static function off() {
+		static $off = null;
+		if ( null === $off ) $off = DXPS_Helpers::excluded_role();
+		return $off;
+	}
+
 	public static function head_output() {
+		if ( self::off() ) {
+			// Keep the public JS interface alive so consent banners and theme code calling it do not error.
+			echo "\n<!-- DX Pixel Suite: tracking is off for this user role -->\n<script>window.dataLayer=window.dataLayer||[];window.gtag=window.gtag||function(){};window.dxpsQ=[];window.dxpsFire=function(){};window.dxpsConsent=function(){};window.dxpsMarketingAllowed=function(){return false};window.EynnaConsent=window.EynnaConsent||{update:function(){}};</script>\n";
+			return;
+		}
 		$gtm  = DXPS_Helpers::on( 'gtm_enabled' ) ? DXPS_Helpers::opt( 'gtm_id' ) : '';
 		$ga4  = DXPS_Helpers::on( 'ga4_enabled' ) ? DXPS_Helpers::opt( 'ga4_id' ) : '';
 		$aw   = DXPS_Helpers::on( 'gads_enabled' ) ? DXPS_Helpers::opt( 'gads_conversion_id' ) : '';
@@ -93,13 +105,17 @@ gtag('set','url_passthrough',true);
 		}
 
 		echo '<script>window.dxpsConsentRequired=' . ( DXPS_Helpers::on( 'consent_mode' ) ? 'true' : 'false' ) . ';</script>';
+		if ( DXPS_Helpers::on( 'block_bots' ) ) {
+			// Decided in the browser because cached HTML is the same for people and crawlers.
+			echo "<script>window.dxpsBot=!!navigator.webdriver||/bot[\\/;]|adsbot|crawl|spider|slurp|headless|lighthouse|pagespeed|gtmetrix|pingdom|uptimerobot|statuscake|facebookexternalhit|scrape|phantomjs|ahrefs|semrush|bytespider/i.test(navigator.userAgent||'');</script>";
+		}
 
 		// Shared interface: GTM's EynnaConsent and DX use the same withdrawal cookie.
 		echo <<<'DXPS_CONSENT_BRIDGE'
 <script>
 (function(w){
 function state(){var m=document.cookie.match(/(?:^|;\s*)_dxps_consent=(granted|denied)(?:;|$)/);if(m)return m[1];try{var s=localStorage.getItem('eh-consent');return s==='granted'||s==='denied'?s:''}catch(e){return ''}}
-w.dxpsMarketingAllowed=function(){return state()!=='denied'&&(!(w.dxpsConsentRequired)||state()==='granted')};
+w.dxpsMarketingAllowed=function(){return !w.dxpsBot&&state()!=='denied'&&(!(w.dxpsConsentRequired)||state()==='granted')};
 w.dxpsConsent=function(value){var g=value===true||value==='granted',s=g?'granted':'denied';document.cookie='_dxps_consent='+s+';path=/;max-age=15552000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');try{localStorage.setItem('eh-consent',s)}catch(e){}w.__ehConsentState={analytics_storage:s,ad_storage:s,ad_user_data:s,ad_personalization:s};gtag('consent','update',w.__ehConsentState);dataLayer.push({event:'consent_update',consent_state:s});if(g&&w.dxpsInitIdentity)w.dxpsInitIdentity();if(g&&w.dxpsInitMeta)w.dxpsInitMeta();document.dispatchEvent(new CustomEvent('dxps:consent',{detail:s}))};
 w.EynnaConsent=w.EynnaConsent||{};w.EynnaConsent.update=w.dxpsConsent;
 var saved=state();if(saved)w.dxpsConsent(saved);
@@ -127,9 +143,11 @@ DXPS_CONSENT_BRIDGE;
 		if ( $meta ) {
 			$adv = self::advanced_matching_js();
 			$px  = esc_js( $meta );
+			// 1.7.0 (opt-in): Meta Limited Data Use, geolocated by Meta (country 0, state 0).
+			$ldu = DXPS_Helpers::on( 'meta_ldu' ) ? "fbq('dataProcessingOptions',['LDU'],0,0);" : '';
 			echo "<script>
 window.dxpsMetaReady=false;
-window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;fbq('init','{$px}'{$adv});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
+window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}fbq('init','{$px}'{$adv});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
 </script>\n";
 			if ( DXPS_Helpers::marketing_allowed() ) {
 				echo "<script>window.dxpsInitMeta();</script>\n";
@@ -177,20 +195,24 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			'downloads' => DXPS_Helpers::on( 'track_downloads' ) ? 1 : 0,
 			'custom'    => self::custom_events_cfg(),
 			'autoAm'    => ( DXPS_Helpers::on( 'auto_am' ) && ( $meta || $ga4 ) ) ? 1 : 0,
+			// ---- 1.7.0 (all opt-in) ----
+			'amAll'       => DXPS_Helpers::on( 'am_all_forms' ) ? 1 : 0,
+			'urlIdentity' => DXPS_Helpers::on( 'auto_am' ) ? DXPS_Helpers::url_identity() : array(),
+			'baseCountry' => DXPS_Helpers::on( 'phone_default_country' ) ? strtolower( DXPS_Helpers::default_country() ) : '',
+			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,
+			'formLeads'   => DXPS_Helpers::on( 'track_form_leads' ) ? 1 : 0,
+			'outbound'    => DXPS_Helpers::on( 'track_outbound' ) ? 1 : 0,
 			'userIngest'=> ( DXPS_Helpers::on( 'auto_am' ) && DXPS_Helpers::on( 'server_relay' ) && ( $meta || $ga4 ) ) ? esc_url_raw( rest_url( 'dxps/v1/u' ) ) : '',
 		);
 		echo '<script>window.dxpsCfg=' . wp_json_encode( $cfg ) . ";</script>\n";
 		echo "<!-- /DX Pixel Suite -->\n";
 	}
 
-	/** Custom events config (settings lines: css-selector | event_name). */
+	/** Custom event rules for the browser (see DXPS_Helpers::custom_events() for the syntax). */
 	private static function custom_events_cfg() {
 		$out = array();
-		foreach ( preg_split( '/\r?\n/', (string) DXPS_Helpers::opt( 'custom_events' ) ) as $line ) {
-			$parts = array_map( 'trim', explode( '|', $line ) );
-			if ( count( $parts ) >= 2 && preg_match( '/^[a-zA-Z0-9_]{2,40}$/', $parts[1] ) ) {
-				$out[] = array( 'sel' => $parts[0], 'name' => strtolower( $parts[1] ) );
-			}
+		foreach ( DXPS_Helpers::custom_events() as $ce ) {
+			$out[] = array( 'sel' => 'click' === $ce['type'] ? $ce['arg'] : '', 'type' => $ce['type'], 'arg' => $ce['arg'], 'name' => $ce['name'], 'meta' => $ce['meta'], 'opts' => (object) $ce['opts'] );
 		}
 		return $out;
 	}
@@ -209,6 +231,7 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 		return '';
 	}
 	public static function enqueue() {
+		if ( self::off() ) return;
 		$deps = array( 'jquery' );
 		if ( DXPS_Helpers::engine_direct() ) {
 			// Direct Google mode: enriched event engine (port of the GTM container's custom tags).
@@ -221,7 +244,7 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 	/* ============================ EVENTS ============================ */
 
 	public static function footer_events() {
-		if ( ! function_exists( 'WC' ) ) return;
+		if ( ! function_exists( 'WC' ) || self::off() ) return;
 		$events = array();
 
 		// Session-queued events (add/remove cart from previous request).
@@ -294,7 +317,7 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 		$event_id = 'purchase.' . $order_id; // stable ID => Meta dedup browser vs CAPI.
 		$params   = array_merge( array(
 			'transaction_id' => (string) $order->get_order_number(),
-			'value'          => (float) $order->get_total(),
+			'value'          => DXPS_Helpers::order_value( $order ),
 			'currency'       => $order->get_currency(),
 			'items'          => DXPS_Helpers::order_items( $order ),
 			'coupon'         => implode( ',', DXPS_Helpers::safe_coupons( $order ) ),
@@ -356,7 +379,8 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 	public static function save_blocks_attribution( $order ) { self::save_attribution( $order ); $order->save(); }
 
 	public static function save_attribution( $order ) {
-		$allowed = DXPS_Helpers::marketing_allowed();
+		// Orders placed by an excluded staff/test role are held back from server-side purchase delivery too.
+		$allowed = DXPS_Helpers::marketing_allowed() && ! DXPS_Helpers::excluded_role();
 		$order->update_meta_data( '_dxps_marketing_allowed', $allowed ? '1' : '0' );
 		$order->update_meta_data( '_dxps_consent_recorded_at', time() );
 		if ( ! $allowed ) return;

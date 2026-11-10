@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: First-party marketing tracking for WooCommerce. Meta Pixel + Conversions API, GA4 (gtag + Measurement Protocol), Google Ads + Enhanced Conversions, GTM dataLayer mode, Consent Mode v2 (toggle), status-based Purchase for COD, WhatsApp/phone/email lead events. Built for eynna-hair.ba by Digital X.
- * Version:     1.6.1
+ * Version:     1.7.0
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '1.6.1' );
+define( 'DXPS_VERSION', '1.7.0' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -60,6 +60,19 @@ register_activation_hook( __FILE__, function () {
 		'auto_am'             => 1,    // Automatic Advanced Matching (scan forms for customer data)
 		'excluded_coupons'    => 'alopeci',     // never sent to any platform
 		'debug_log'           => 0,
+		// 1.7.0 - every new feature is off until switched on
+		'am_retention_days'     => 0,       // 0 = 10 minutes; up to 180 days
+		'am_all_forms'          => 0,
+		'url_identity'          => '',
+		'phone_default_country' => 0,
+		'fbp_fallback'          => 0,
+		'track_form_leads'      => 0,
+		'track_outbound'        => 0,
+		'block_bots'            => 0,
+		'exclude_roles'         => '',
+		'purchase_value'        => 'total', // or 'net' (without tax and shipping)
+		'meta_ldu'              => 0,
+		'event_log'             => 0,
 	);
 	$existing = get_option( 'dxps_settings', array() );
 	update_option( 'dxps_settings', array_merge( $defaults, (array) $existing ) );

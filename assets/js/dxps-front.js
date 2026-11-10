@@ -45,6 +45,13 @@
 		}
 	})();
 
+	// 1.7.0 (opt-in): if Meta's script is blocked it never sets _fbp. After giving it time, create one in
+	// Meta's own format (fb.1.<ms>.<random>) so server events still carry a browser ID.
+	if (cfg.fbpFallback && !getCookie('_fbp')) setTimeout(function () {
+		if (getCookie('_fbp') || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;
+		setCookie('_fbp', 'fb.1.' + Date.now() + '.' + Math.floor(Math.random() * 9e9 + 1e9), 90);
+	}, 2500);
+
 	if(META_PIXEL&&window.dxpsMetaReady&&typeof fbq==='function'&&getCookie('pbid')){try{fbq('init',META_PIXEL,{external_id:getCookie('pbid')});}catch(e){}}
 	if (!getCookie('_dxps_lp')) setCookie('_dxps_lp', encodeURIComponent(safeUrl(location.href).slice(0, 300)), 90);
 	};
@@ -60,9 +67,12 @@
 		// event_name match, not just a matching event_id), which was silently splitting these into
 		// two separate, uncoordinated event buckets in Events Manager (e.g. "scroll" vs "PageScroll").
 		scroll: 'PageScroll', time_on_page: 'TimeOnPage', internal_click: 'InternalClick',
-		form_submit: 'Form', file_download: 'Download', login: 'Login', sign_up: 'CompleteRegistration', comment: 'Comment'
+		form_submit: 'Form', file_download: 'Download', login: 'Login', sign_up: 'CompleteRegistration', comment: 'Comment',
+		outbound_click: 'OutboundClick'
 	};
 	var metaStandard = { ViewContent: 1, AddToCart: 1, InitiateCheckout: 1, AddToWishlist:1, AddPaymentInfo:1, Search: 1, Lead: 1, Purchase: 1, CompleteRegistration: 1 };
+	// Custom rules named after a Meta standard event (Lead, Schedule, Contact ...) are sent as that standard event.
+	(cfg.custom || []).forEach(function (ce) { if (ce.meta) { metaMap[ce.name] = ce.meta; metaStandard[ce.meta] = 1; } });
 
 	function metaParams(name, p) {
 		var out = {};if(typeof p.value!=='undefined'||(p.items&&p.items.length))out.currency=p.currency||cfg.currency;
@@ -110,8 +120,10 @@
 		['event_url','landing_page','link_url','form_action'].forEach(function(k){if(p[k])p[k]=safeUrl(p[k])});
 		var amDelivery=window.dxpsAmFlush?window.dxpsAmFlush():null;
 
+		var skipGoogle = scope === 'meta_only'; // the Google engine already reports this action itself
+
 		/* Google Ads conversion (purchase / lead), with Enhanced Conversions */
-		if (cfg.googleDirect && p._gads_send_to && typeof gtag === 'function') {
+		if (!skipGoogle && cfg.googleDirect && p._gads_send_to && typeof gtag === 'function') {
 			if (p._ec) gtag('set', 'user_data', p._ec);
 			gtag('event', 'conversion', {
 				send_to: p._gads_send_to,
@@ -135,7 +147,7 @@
 		var extraKeys = ['page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'user_role',
 			'traffic_source', 'landing_page', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
 			'percent_scrolled', 'time_on_page', 'link_url', 'link_text', 'form_id', 'form_action', 'file_name',
-			'file_extension', 'brand', 'coupon_used', 'coupon_name', 'shipping_cost', 'fees', 'transactions_count',
+			'file_extension', 'link_domain', 'brand', 'coupon_used', 'coupon_name', 'shipping_cost', 'fees', 'transactions_count',
 			'average_order', 'predicted_ltv', 'tags', 'plugin', 'event_url', 'event_time', 'event_day', 'event_month'];
 		coreKeys.forEach(function (k) {
 			if (typeof p[k] !== 'undefined' && p[k] !== '') glp[k] = p[k];
@@ -148,7 +160,9 @@
 		if (glp.items) glp.items = glp.items.map(function (i) {
 			return { item_id: i.id, item_name: i.name, price: i.price, quantity: i.quantity || 1, item_category: i.category || '', item_brand: i.brand || undefined, index: i.index };
 		});
-		if (cfg.engineDirect) {
+		if (skipGoogle) {
+			// nothing to send to Google
+		} else if (cfg.engineDirect) {
 			// Direct Google mode: the enriched engine (dxps-google.js) owns GA4 / Google Ads events;
 			// DX only hands over the events the engine cannot see (server-rendered purchase, tel/WhatsApp leads, forms ...).
 			if (window.dxpsGoogleRoute) window.dxpsGoogleRoute(name, glp, id);
@@ -272,16 +286,97 @@
 		}, true);
 	}
 
-	/* ---------- custom events (settings: selector | event_name) ---------- */
+	/* ---------- custom events (settings: trigger | event_name | options) ----------
+	   Triggers: click (CSS selector), url, scroll, hover, submit, visits, copy.
+	   Options : value, currency, value_param, block (minutes), need_fbc, device. */
+	function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+	function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+	function validSel(sel) { try { document.querySelector(sel); return true; } catch (e) { return false; } }
+	function fireCustom(ce, extra) {
+		var o = ce.opts || {}, p = Object.assign({ trigger_type: ce.type }, extra || {});
+		if (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed()) return;
+		if (o.device) { var mobile = window.matchMedia && window.matchMedia('(max-width: 767px)').matches; if ((o.device === 'mobile') !== !!mobile) return; }
+		if (o.need_fbc && !getCookie('_fbc')) return;                       // blocking rule: only ad-click visitors
+		if (o.block) {                                                      // blocking rule: not again within N minutes
+			var key = 'dxps_blk_' + ce.name, last = parseInt(lsGet(key), 10) || 0;
+			if (Date.now() - last < o.block * 60000) return;
+			lsSet(key, String(Date.now()));
+		}
+		var v = typeof o.value === 'number' ? o.value : NaN;
+		if (o.value_param) { var q = new URLSearchParams(location.search).get(o.value_param); if (q !== null && q !== '' && Number.isFinite(Number(q)) && Number(q) >= 0) v = Number(q); }
+		if (Number.isFinite(v)) { p.value = v; p.currency = o.currency || cfg.currency; }
+		window.dxpsFire({ name: ce.name, params: p });
+	}
+	var pageVisits = 0;
+	if ((cfg.custom || []).some(function (ce) { return ce.type === 'visits'; }) && !(window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) {
+		pageVisits = (parseInt(lsGet('dxps_pv'), 10) || 0) + 1; lsSet('dxps_pv', String(pageVisits));
+	}
 	(cfg.custom || []).forEach(function (ce) {
-		// Validate once: an invalid selector would otherwise throw inside the listener on every click.
-		try { document.querySelector(ce.sel); } catch (e) { return; }
-		document.addEventListener('click', function (ev) {
-			if (ev.target.closest && ev.target.closest(ce.sel)) {
-				window.dxpsFire({ name: ce.name, params: { trigger_selector: ce.sel } });
-			}
-		}, true);
+		var type = ce.type || 'click', arg = ce.arg, done = false;
+		function once(extra) { if (done) return; done = true; fireCustom(ce, extra); }
+		if (type === 'click') {
+			var sel = arg || ce.sel;
+			// Validate once: an invalid selector would otherwise throw inside the listener on every click.
+			if (!sel || !validSel(sel)) return;
+			document.addEventListener('click', function (ev) {
+				if (ev.target.closest && ev.target.closest(sel)) fireCustom(ce, { trigger_selector: sel });
+			}, true);
+		} else if (type === 'url') {
+			// Exact path, or a prefix when the pattern ends with *. Trailing slashes are ignored.
+			var pat = String(arg || ''), prefix = pat.slice(-1) === '*', want = (prefix ? pat.slice(0, -1) : pat).replace(/\/+$/, '') || '/';
+			var path = location.pathname.replace(/\/+$/, '') || '/';
+			if (prefix ? path.indexOf(want) === 0 : path === want) $(function () { once(); });
+		} else if (type === 'scroll') {
+			window.addEventListener('scroll', function () {
+				var h = document.documentElement, max = h.scrollHeight - h.clientHeight;
+				if (max > 0 && Math.round(100 * (window.pageYOffset || h.scrollTop) / max) >= arg) once({ percent_scrolled: arg });
+			}, { passive: true });
+		} else if (type === 'hover') {
+			if (!validSel(arg)) return;
+			document.addEventListener('mouseover', function (ev) { if (ev.target.closest && ev.target.closest(arg)) once(); }, true);
+		} else if (type === 'submit') {
+			if (!validSel(arg)) return;
+			document.addEventListener('submit', function (ev) { if (ev.target.closest && ev.target.closest(arg)) fireCustom(ce); }, true);
+		} else if (type === 'copy') {
+			document.addEventListener('copy', function () { once(); }, true);
+		} else if (type === 'visits') {
+			if (pageVisits === arg) $(function () { once(); });
+		}
 	});
+
+	/* ---------- form-plugin leads (opt-in): a successful submission becomes a Lead ---------- */
+	if (cfg.formLeads) {
+		var formLeadSeen = {};
+		var formLead = function (plugin, id, engineOwns) {
+			var key = plugin + ':' + (id || '');
+			if (formLeadSeen[key]) return; formLeadSeen[key] = 1;
+			var p = { lead_type: 'form', value: 0, form_id: String(id || plugin).slice(0, 80) };
+			if (cfg.gadsLead) p._gads_send_to = cfg.gadsLead;
+			// In Direct Google mode the engine already reports CF7 / WPForms leads to Google.
+			if (engineOwns && cfg.engineDirect) p._scope = 'meta_only';
+			window.dxpsFire({ name: 'generate_lead', params: p });
+		};
+		document.addEventListener('wpcf7mailsent', function (e) { formLead('cf7', e.detail && e.detail.contactFormId, true); });
+		document.addEventListener('wpformsAjaxSubmitSuccess', function (e) { formLead('wpforms', e.detail && e.detail.formId, true); });
+		document.addEventListener('forminator:form:submit:success', function (e) { formLead('forminator', e.target && e.target.id); });
+		$(document).on('submit_success', function (e) { formLead('elementor', e.target && (e.target.id || e.target.getAttribute('name'))); });
+		$(document).on('gform_confirmation_loaded', function (e, formId) { formLead('gravity', formId); });
+		$(document).on('fluentform_submission_success', function (e, data) { formLead('fluent', data && data.form && data.form[0] && data.form[0].id); });
+		$(document).on('nfFormSubmitResponse', function (e, data) { formLead('ninja', data && data.id); });
+	}
+
+	/* ---------- outbound link clicks (opt-in) ---------- */
+	if (cfg.outbound) {
+		var outboundCount = 0;
+		document.addEventListener('click', function (ev) {
+			var a = ev.target.closest && ev.target.closest('a');
+			if (!a || !a.href || outboundCount >= 10) return;
+			if ((a.protocol !== 'http:' && a.protocol !== 'https:') || a.host === location.host) return;
+			if (/wa\.me|api\.whatsapp\.com/.test(a.href)) return; // counted as a lead instead
+			outboundCount++;
+			window.dxpsFire({ name: 'outbound_click', params: { link_domain: a.hostname.slice(0, 100) } });
+		}, true);
+	}
 
 	/* ---------- Automatic Advanced Matching: detect customer fields in forms ----------
 	   Scans inputs the visitor fills in (checkout, contact, account, newsletter) and feeds
@@ -294,7 +389,7 @@
 	   with data-dxps-ignore. Those exclusions are matched first and are absolute. */
 	if (cfg.autoAm) {
 		var amFound = {}, amTimer = null, amPending = Promise.resolve(), amLast = '';
-		function normalize(k,v,c){v=String(v||'').trim().toLowerCase();if(k==='ph'){var n=v.replace(/\D/g,''),cc={ba:'387',rs:'381',hr:'385',si:'386',de:'49',at:'43',ch:'41',me:'382',mk:'389',gb:'44',us:'1',ca:'1',fr:'33',it:'39',nl:'31',se:'46'}[c];if(/^00/.test(v))n=n.slice(2);else if(!/^\+/.test(v)){if(!cc)return '';if(n.indexOf(cc)!==0)n=cc+n.replace(/^0+/, '');}return /^[1-9]\d{7,14}$/.test(n)?n:'';}if(k==='em')return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)?v:'';if(k==='country')return /^[a-z]{2}$/.test(v)?v:'';if(k==='zp'){v=v.replace(/[^a-z0-9]/g,'');return c==='us'?v.slice(0,5):v;}return v.replace(/[^\p{L}]/gu,'');}
+		function normalize(k,v,c){v=String(v||'').trim().toLowerCase();c=c||cfg.baseCountry||'';if(k==='ph'){var n=v.replace(/\D/g,''),cc={ba:'387',rs:'381',hr:'385',si:'386',de:'49',at:'43',ch:'41',me:'382',mk:'389',gb:'44',us:'1',ca:'1',fr:'33',it:'39',nl:'31',se:'46'}[c];if(/^00/.test(v))n=n.slice(2);else if(!/^\+/.test(v)){if(!cc)return '';if(n.indexOf(cc)!==0)n=cc+n.replace(/^0+/, '');}return /^[1-9]\d{7,14}$/.test(n)?n:'';}if(k==='em')return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)?v:'';if(k==='country')return /^[a-z]{2}$/.test(v)?v:'';if(k==='zp'){v=v.replace(/[^a-z0-9]/g,'');return c==='us'?v.slice(0,5):v;}return v.replace(/[^\p{L}]/gu,'');}
 		function digest(v){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)).then(function(buf){return Array.from(new Uint8Array(buf)).map(function(n){return n.toString(16).padStart(2,'0')}).join('')});}
 
 		var AM_BLOCK = /pass|pwd|card|cc-|cvv|cvc|csc|iban|swift|account.*number|routing|secur|diagnos|health|medical|birth|gender/i;
@@ -310,7 +405,10 @@
 		];
 
 		function amClassify(el) {
-			if(!el.closest('form.checkout,form.woocommerce-checkout,form.woocommerce-form-login,form.woocommerce-form-register,form.woocommerce-EditAccountForm,[data-dxps-match],.wc-block-checkout'))return null;
+			if(!el.closest)return null;
+			if(el.type==='search'||el.closest('form[role=search],.search-form,.woocommerce-product-search'))return null;
+			// Default: checkout/account forms and forms opted in with data-dxps-match. Opt-in setting: any form.
+			if(!(cfg.amAll&&el.closest('form'))&&!el.closest('form.checkout,form.woocommerce-checkout,form.woocommerce-form-login,form.woocommerce-form-register,form.woocommerce-EditAccountForm,[data-dxps-match],.wc-block-checkout'))return null;
 			if(el.disabled||el.type==='hidden'||!el.checkValidity()||el.closest('[data-dxps-ignore]'))return null;
 			var hay = [el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.placeholder]
 				.filter(Boolean).join(' ');
@@ -338,6 +436,19 @@
 			return amPending;
 		}
 		window.dxpsAmFlush=amFlush;
+
+		// 1.7.0 (opt-in): identity from mapped URL parameters (email/SMS/booking links). Values go through the
+		// same normalise -> hash -> ingest path as form fields and are never sent in an event URL.
+		if ((cfg.urlIdentity || []).length && !blocked() && !(window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) {
+			var uq = new URLSearchParams(location.search);
+			cfg.urlIdentity.forEach(function (m) {
+				var v = (uq.get(m[0]) || '').trim().toLowerCase();
+				if (v.length < 2 || v.length > 200) return;
+				if (m[1] === 'name') { var sp = v.split(/\s+/); amFound.fn = sp[0]; if (sp.length > 1) amFound.ln = sp.slice(1).join(' '); }
+				else amFound[m[1]] = v;
+			});
+			if (Object.keys(amFound).length) amFlush();
+		}
 
 		function amCapture(el) {
 			if (blocked() || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;

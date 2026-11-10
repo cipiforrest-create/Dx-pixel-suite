@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.6.1
-Stable tag: 1.6.1
+Version: 1.7.0
+Stable tag: 1.7.0
 Requires PHP: 7.4
 WooCommerce required. HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,38 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 1.7.0 =
+Every new feature is OFF after upgrading. Nothing changes until you switch it on (Events & Parameters / Platforms tabs).
+The "Recommended setup" tab lists them. Make sure your privacy policy and consent banner cover the matching features.
+
+Matching (Event Match Quality)
+* Remember matching data: keep the hashed matching data for a returning browser for up to 180 days (default stays 10 minutes).
+* All forms: detect customer data in any form, not only checkout/account forms. Search, password and payment fields stay excluded.
+* URL parameters: map URL parameters (email, phone, name ...) to matching fields for email, SMS and booking links.
+* Phone numbers: assume the store country when a number has no country code.
+* Browser ID fallback: create the _fbp cookie in Meta's format when Meta's script is blocked.
+* Always on: purchases and relayed events send both the browser ID and the account ID as external IDs.
+
+Events
+* Custom event rules: new triggers url:, scroll:, hover:, submit:, visits: and copy, next to click selectors.
+  Options: value, currency, value_param, block (minutes), need_fbc, device. Existing "selector | name" lines work unchanged.
+* Rules named Lead, Contact, Schedule, Subscribe, StartTrial, SubmitApplication, CompleteRegistration, FindLocation,
+  CustomizeProduct or Donate are sent to Meta as standard events. NOTE: an existing rule with one of these names was a
+  custom event before and becomes the standard event now.
+* Form leads: successful Contact Form 7, WPForms, Elementor, Gravity, Fluent, Forminator and Ninja submissions -> Lead.
+* Outbound link clicks -> OutboundClick (link domain only).
+
+Data quality
+* Block bots (browser and server relay). Excluded roles (staff and test orders are not tracked).
+* Purchase value: order total, or total without tax and shipping.
+* Meta Limited Data Use for the pixel and the Conversions API.
+
+Diagnostics
+* New Diagnostics tab: last 200 server events and, per event, the share that carried each matching field
+  (field names only, no values). Needs "Event log" switched on.
+
+Not included by design: lifetime-value / date-of-birth / gender enrichment (removed earlier for privacy), multiple pixels.
 
 = 1.6.1 =
 * Fix: GA4 Measurement Protocol purchases and refunds were sent with the user_id of whoever changed the order (the administrator), not the customer. Order-based sends now use the order's customer ID, and guest orders send none.
