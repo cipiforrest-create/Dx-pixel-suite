@@ -183,13 +183,57 @@ class DXPS_Helpers {
 		return $d;
 	}
 
-	/** Only an actual Facebook Login ID; never infer DOB, gender or other demographics. */
-	public static function user_extra( $user_id ) {
-		foreach ( apply_filters( 'dxps_fb_login_meta_keys', array( 'facebook_id','fb_user_id','_fb_user_id','nsl_facebook_id','wsl_facebook_id' ) ) as $k ) {
-			$v = (string) get_user_meta( $user_id, $k, true );
-			if ( preg_match( '/^[0-9]{5,50}$/', $v ) ) return array( 'fb_login_id' => $v );
+	/** User-meta keys in which social-login plugins store the Facebook app-scoped user ID. */
+	const FB_LOGIN_META = array( 'facebook_id', 'fb_user_id', '_fb_user_id', 'nsl_facebook_id', 'wsl_facebook_id', '_wc_social_login_facebook_identifier', 'fb_login_id', 'facebook_login_id' );
+
+	/** Nextend Social Login keeps its IDs in its own table ({prefix}social_users), not in user meta. */
+	private static function nextend_table() {
+		global $wpdb;
+		if ( ! is_object( $wpdb ) ) return '';
+		$table  = $wpdb->prefix . 'social_users';
+		$exists = get_transient( 'dxps_nsl_table' );
+		if ( false === $exists ) {
+			$exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table ? 'yes' : 'no';
+			set_transient( 'dxps_nsl_table', $exists, DAY_IN_SECONDS );
 		}
-		return array();
+		return 'yes' === $exists ? $table : '';
+	}
+
+	/**
+	 * Only an actual Facebook Login ID; never infer DOB, gender or other demographics.
+	 * Sources: user meta written by common social-login plugins, Super Socializer, and Nextend Social Login's table.
+	 * (Google login has no Meta parameter of its own; it helps through the account's email address.)
+	 */
+	public static function user_extra( $user_id ) {
+		static $cache = array();
+		$user_id = (int) $user_id;
+		if ( $user_id <= 0 ) return array();
+		if ( isset( $cache[ $user_id ] ) ) return $cache[ $user_id ];
+		$id = '';
+		foreach ( apply_filters( 'dxps_fb_login_meta_keys', self::FB_LOGIN_META ) as $k ) {
+			$v = (string) get_user_meta( $user_id, $k, true );
+			if ( preg_match( '/^[0-9]{5,50}$/', $v ) ) { $id = $v; break; }
+		}
+		if ( ! $id && 'facebook' === strtolower( (string) get_user_meta( $user_id, 'thechamp_provider', true ) ) ) {
+			$v = (string) get_user_meta( $user_id, 'thechamp_social_id', true );
+			if ( preg_match( '/^[0-9]{5,50}$/', $v ) ) $id = $v;
+		}
+		if ( ! $id && ( $table = self::nextend_table() ) ) {
+			global $wpdb;
+			$v = (string) $wpdb->get_var( $wpdb->prepare( "SELECT identifier FROM {$table} WHERE ID = %d AND type IN ('fb','facebook') LIMIT 1", $user_id ) );
+			if ( preg_match( '/^[0-9]{5,50}$/', $v ) ) $id = $v;
+		}
+		return $cache[ $user_id ] = $id ? array( 'fb_login_id' => $id ) : array();
+	}
+
+	/** Diagnostics: how many accounts have a Facebook Login ID that DX can read. */
+	public static function fb_login_count() {
+		global $wpdb;
+		if ( ! is_object( $wpdb ) ) return 0;
+		$keys = self::FB_LOGIN_META;
+		$n = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(DISTINCT user_id) FROM {$wpdb->usermeta} WHERE meta_key IN (" . implode( ',', array_fill( 0, count( $keys ), '%s' ) ) . ") AND meta_value REGEXP '^[0-9]{5,50}$'", $keys ) );
+		if ( $table = self::nextend_table() ) $n += (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE type IN ('fb','facebook')" );
+		return $n;
 	}
 
 	/**

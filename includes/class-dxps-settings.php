@@ -289,6 +289,10 @@ class DXPS_Settings {
 		echo '<tr><td>Content views</td><td><code>content_types</code></td><td>' . ( $ct ? '<span style="color:#00a32a;font-weight:600">ON</span> (' . esc_html( implode( ', ', $ct ) ) . ')' : '<span style="color:#d63638;font-weight:600">OFF</span>' ) . '</td></tr>';
 		echo '<tr><td>Meta pixel</td><td><code>meta_enabled</code></td><td>' . ( DXPS_Helpers::on( 'meta_enabled' ) && DXPS_Helpers::opt( 'meta_pixel_id' ) ? '<span style="color:#00a32a;font-weight:600">ON</span>' : '<span style="color:#d63638;font-weight:600">OFF</span>' ) . '</td></tr>';
 		echo '</tbody></table>';
+		$fbn = DXPS_Helpers::fb_login_count();
+		echo '<h2>Facebook Login ID</h2><p>' . ( $fbn > 0
+			? '<span style="color:#00a32a;font-weight:600">' . (int) $fbn . ' account(s)</span> have a Facebook Login ID that DX can read. It is sent with server events while that customer is logged in, and with their purchases.'
+			: '<span style="color:#d63638;font-weight:600">None found.</span> DX reads the ID from Nextend Social Login, WooCommerce Social Login, Super Socializer and common user-meta fields. If your login plugin stores it elsewhere, tell your developer the meta key and add it with the <code>dxps_fb_login_meta_keys</code> filter.' ) . '</p>';
 		echo '<h2>Matching-field coverage</h2>';
 		if ( ! DXPS_Helpers::on( 'event_log' ) ) {
 			echo '<p>The event log is off. Turn on <strong>Event log</strong> on the Events &amp; Parameters tab, browse the shop and place a test order, then come back here.</p>';

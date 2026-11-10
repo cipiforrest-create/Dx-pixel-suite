@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: First-party marketing tracking for WooCommerce. Meta Pixel + Conversions API, GA4 (gtag + Measurement Protocol), Google Ads + Enhanced Conversions, GTM dataLayer mode, Consent Mode v2 (toggle), status-based Purchase for COD, WhatsApp/phone/email lead events. Built for eynna-hair.ba by Digital X.
- * Version:     1.8.0
+ * Version:     1.8.1
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '1.8.0' );
+define( 'DXPS_VERSION', '1.8.1' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -73,7 +73,7 @@ register_activation_hook( __FILE__, function () {
 		'purchase_value'        => 'total', // or 'net' (without tax and shipping)
 		'meta_ldu'              => 0,
 		'event_log'             => 0,
-		// 1.8.0
+		// 1.8.1
 		'content_types'         => '',      // comma list of post types: post,page,<custom>
 		'content_service_paths' => '',
 		'content_meta_event'    => 'auto',  // auto | standard (ViewContent) | custom (ContentView)
@@ -107,7 +107,7 @@ add_action( 'plugins_loaded', function () {
 		update_option( 'dxps_version', DXPS_VERSION, false );
 	}
 	DXPS_Settings::init();
-	// 1.8.0: WooCommerce is optional. Without it DX tracks page views, content, leads, forms and custom events.
+	// 1.8.1: WooCommerce is optional. Without it DX tracks page views, content, leads, forms and custom events.
 	DXPS_Tracking::init();
 	DXPS_Server::init();
 } );

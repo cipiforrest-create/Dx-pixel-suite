@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.8.0
-Stable tag: 1.8.0
+Version: 1.8.1
+Stable tag: 1.8.1
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,10 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 1.8.1 =
+* Facebook Login ID is now also read from Nextend Social Login (its own database table), WooCommerce Social Login
+  and Super Socializer, not only from a few user-meta fields. Diagnostics shows how many accounts have one.
 
 = 1.8.0 =
 Content tracking (off until you tick content types on Events & Parameters)
