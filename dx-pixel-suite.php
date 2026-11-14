@@ -2,16 +2,17 @@
 /**
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
- * Description: First-party marketing tracking for WooCommerce. Meta Pixel + Conversions API, GA4 (gtag + Measurement Protocol), Google Ads + Enhanced Conversions, GTM dataLayer mode, Consent Mode v2 (toggle), status-based Purchase for COD, WhatsApp/phone/email lead events. Built for eynna-hair.ba by Digital X.
- * Version:     1.8.1
+ * Description: WooCommerce and content tracking with Meta Pixel/CAPI, GA4, Google Ads, consent controls and scheduled product catalogues for Google, Meta, Pinterest and Microsoft.
+ * Version:     2.2.0
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
+ * Requires at least: 6.4
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '1.8.1' );
+define( 'DXPS_VERSION', '2.2.0' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -20,6 +21,18 @@ require_once DXPS_DIR . 'includes/class-dxps-helpers.php';
 require_once DXPS_DIR . 'includes/class-dxps-settings.php';
 require_once DXPS_DIR . 'includes/class-dxps-tracking.php';
 require_once DXPS_DIR . 'includes/class-dxps-server.php';
+require_once DXPS_DIR . 'includes/class-dxps-jobs.php';
+require_once DXPS_DIR . 'includes/class-dxps-delivery.php';
+require_once DXPS_DIR . 'includes/class-dxps-feed-product.php';
+require_once DXPS_DIR . 'includes/class-dxps-feed-options.php';
+require_once DXPS_DIR . 'includes/class-dxps-feed-editor.php';
+require_once DXPS_DIR . 'includes/class-dxps-feeds.php';
+require_once DXPS_DIR . 'includes/class-dxps-feeds-admin.php';
+require_once DXPS_DIR . 'includes/class-dxps-product-fields.php';
+
+add_action( 'before_woocommerce_init', function () {
+	if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+} );
 
 register_activation_hook( __FILE__, function () {
 	$defaults = array(
@@ -74,14 +87,20 @@ register_activation_hook( __FILE__, function () {
 		'meta_ldu'              => 0,
 		'event_log'             => 0,
 		// 1.8.1
-		'content_types'         => '',      // comma list of post types: post,page,<custom>
+		'content_types'         => 'post',      // comma list of post types: post,page,<custom>
 		'content_service_paths' => '',
 		'content_meta_event'    => 'auto',  // auto | standard (ViewContent) | custom (ContentView)
 		'content_archives'      => 0,
-		'content_engaged'       => 0,
+		'content_engaged'       => 1,
 		'content_read_scroll'   => 50,
 		'content_read_time'     => 30,
 		'geo_enrich'            => '',      // '' | country | full
+		// 2.2.0
+		'gads_merchant_id'      => '',      // Merchant Center ID: cart data on the Google Ads purchase conversion
+		'gads_feed_country'     => '',
+		'gads_feed_language'    => '',
+		'gads_remarketing'      => 0,       // Google Ads dynamic remarketing events (opt-in)
+		'ga4_page_titles'       => 0,       // send the real browser title to GA4 (opt-in)
 	);
 	$existing = get_option( 'dxps_settings', array() );
 	update_option( 'dxps_settings', array_merge( $defaults, (array) $existing ) );
@@ -90,6 +109,10 @@ register_activation_hook( __FILE__, function () {
 // Remove the nightly ACR job on deactivation so it does not keep firing while the plugin is off.
 register_deactivation_hook( __FILE__, function () {
 	wp_clear_scheduled_hook( 'dxps_cron_acr' );
+	wp_clear_scheduled_hook( 'dxps_feed_tick' );
+	DXPS_Jobs::cancel( 'dxps_feed_batch' );
+	DXPS_Jobs::cancel( 'dxps_purchase_job' );
+	DXPS_Jobs::cancel( 'dxps_cron_acr_batch' );
 } );
 
 add_action( 'plugins_loaded', function () {
@@ -106,8 +129,12 @@ add_action( 'plugins_loaded', function () {
 		}
 		update_option( 'dxps_version', DXPS_VERSION, false );
 	}
+	add_action( 'update_option_dxps_settings', array( 'DXPS_Helpers', 'reset_options' ) );
 	DXPS_Settings::init();
 	// 1.8.1: WooCommerce is optional. Without it DX tracks page views, content, leads, forms and custom events.
 	DXPS_Tracking::init();
 	DXPS_Server::init();
+	DXPS_Delivery::init();
+	DXPS_Feeds::init();
+	DXPS_Product_Fields::init();
 } );

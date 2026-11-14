@@ -9,8 +9,8 @@ class DXPS_Settings {
 	/** field => tab registry: text fields and checkbox fields per tab (prevents cross-tab wipes on save). */
 	private static $tabs = array(
 		'platforms' => array(
-			'text' => array( 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'ga4_id', 'ga4_api_secret', 'gads_conversion_id', 'gads_purchase_label', 'gads_lead_label', 'gtm_id' ),
-			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu' ),
+			'text' => array( 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'ga4_id', 'ga4_api_secret', 'gads_conversion_id', 'gads_purchase_label', 'gads_lead_label', 'gtm_id', 'gads_merchant_id', 'gads_feed_country', 'gads_feed_language' ),
+			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu', 'gads_remarketing', 'ga4_page_titles' ),
 		),
 		'events' => array(
 			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich' ),
@@ -114,14 +114,16 @@ class DXPS_Settings {
 	}
 
 	public static function page() {
+		if ( ! current_user_can( 'manage_options' ) ) return;
 		$tab = sanitize_key( $_GET['tab'] ?? 'platforms' );
 		echo '<div class="wrap"><h1>DX Pixel Suite <small style="font-weight:normal">v' . esc_html( DXPS_VERSION ) . '</small></h1><nav class="nav-tab-wrapper">';
-		foreach ( array( 'platforms' => 'Platforms', 'events' => 'Events & Parameters', 'consent' => 'Consent & Privacy', 'diagnostics' => 'Diagnostics', 'recommended' => '✓ Recommended setup' ) as $k => $l ) {
+		foreach ( array( 'platforms' => 'Platforms', 'events' => 'Events & Parameters', 'consent' => 'Consent & Privacy', 'feeds' => 'Product Feeds', 'diagnostics' => 'Diagnostics', 'recommended' => '✓ Recommended setup' ) as $k => $l ) {
 			echo '<a class="nav-tab ' . ( $tab === $k ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $k ) ) . '">' . esc_html( $l ) . '</a>';
 		}
 		echo '</nav>';
 		self::conflict_notice();
 		if ( ! empty( $_GET['dxps_saved'] ) ) echo '<div class="notice notice-success is-dismissible"><p>DX Pixel Suite settings saved.</p></div>';
+		if ( 'feeds' === $tab ) { DXPS_Feeds_Admin::page(); echo '</div>'; return; }
 		if ( 'recommended' === $tab ) { self::tab_recommended(); echo '</div>'; return; }
 		if ( 'diagnostics' === $tab ) { self::tab_diagnostics(); echo '</div>'; return; }
 
@@ -148,19 +150,23 @@ class DXPS_Settings {
 		echo '<tr><th></th><td>'; self::c( 'ga4_enabled', 'Enable GA4 (browser tag + server Measurement Protocol)' ); echo '</td></tr>';
 		echo '<tr><th>Measurement ID</th><td>'; self::f( 'ga4_id', 'G-XXXXXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th>MP API secret</th><td>'; self::f( 'ga4_api_secret' ); echo '<p class="description">GA4 Admin → Data streams → stream → Measurement Protocol API secrets.</p></td></tr>';
+		echo '<tr><th>Page titles</th><td>'; self::c( 'ga4_page_titles', 'Send real page titles to GA4', 'Off: GA4 receives a generic title and you report by page path. On: the browser title is sent, as a standard GA4 setup does. Pages with health-related wording are never tracked either way. Campaign parameters (utm_*, gclid, gbraid, wbraid, msclkid) are always kept in the page address so GA4 can attribute sessions; every other URL parameter is removed.' ); echo '</td></tr>';
 		echo '</table><h2>Google Ads</h2><table class="form-table">';
 		echo '<tr><th></th><td>'; self::c( 'gads_enabled', 'Enable Google Ads conversion tracking' ); echo '</td></tr>';
 		echo '<tr><th>Conversion ID</th><td>'; self::f( 'gads_conversion_id', 'AW-XXXXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th>Purchase label</th><td>'; self::f( 'gads_purchase_label' ); echo '</td></tr>';
 		echo '<tr><th>Lead label</th><td>'; self::f( 'gads_lead_label' ); echo '<p class="description">Optional — WhatsApp/phone/email clicks as a secondary conversion.</p></td></tr>';
 		echo '<tr><th></th><td>'; self::c( 'gads_enhanced', 'Enhanced Conversions (hashed billing data with purchases)' ); echo '</td></tr>';
+		echo '<tr><th>Merchant Center ID</th><td>'; self::f( 'gads_merchant_id', '123456789' ); echo '<p class="description">Optional. Adds cart data to the purchase conversion (product IDs, quantities, prices), so Google Ads can report and optimise Shopping / Performance Max per product. Use the Merchant Center account that fetches your DX Google feed. The purchased product IDs are sent with the conversion even without it.</p></td></tr>';
+		echo '<tr><th>Feed country / language</th><td><input name="gads_feed_country" size="4" maxlength="2" placeholder="BA" value="' . esc_attr( DXPS_Helpers::opt( 'gads_feed_country' ) ) . '"> <input name="gads_feed_language" size="4" maxlength="2" placeholder="BS" value="' . esc_attr( DXPS_Helpers::opt( 'gads_feed_language' ) ) . '"><p class="description">Two-letter codes of the Merchant Center feed, e.g. BA and BS. Leave empty if unsure.</p></td></tr>';
+		echo '<tr><th>Dynamic remarketing</th><td>'; self::c( 'gads_remarketing', 'Send product views, cart and checkout events to Google Ads', 'Builds retail remarketing audiences and powers catalogue ads from the same product IDs as your feed. Off by default: personalised advertising is restricted for some product categories (for example health-related ones) - check Google Ads policy for your catalogue before enabling. Needs Google Ads enabled above; not used in GTM-only mode.' ); echo '</td></tr>';
 		echo '</table><h2>Google Tag Manager</h2><table class="form-table">';
 		echo '<tr><th></th><td>'; self::c( 'gtm_enabled', 'Enable GTM container' ); echo '</td></tr>';
 		echo '<tr><th>Container ID</th><td>'; self::f( 'gtm_id', 'GTM-XXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th></th><td>'; self::c( 'gtm_only', 'GTM-only mode', 'Push dataLayer events only; do not load direct GA4/Ads tags (avoids double-tracking if your container fires them).' ); echo '</td></tr>';
 		echo '</table><h2>Direct Google mode (replaces GTM)</h2><table class="form-table">';
-		echo '<tr><th></th><td>'; self::c( 'engine_direct', 'Run the enriched event engine inside DX (no GTM needed)', 'Sends the same GA4 events and parameters as the GTM container (view_item, add_to_cart, page_scroll, contact_click, purchase …) plus the eh_ads_* Google Ads events straight from DX. Works only while "Enable GTM container" above is OFF; needs GA4 (and optionally Google Ads) enabled with IDs filled in.' ); echo '</td></tr>';
-		echo '<tr><th></th><td>'; self::c( 'ga4_server_purchase', 'Also send purchase / refund through GA4 Measurement Protocol', 'Optional server-side backup in Direct Google mode (GA4 de-duplicates by transaction ID). Other events are never mirrored to GA4 server-side in this mode, to avoid double counting.' ); echo '</td></tr>';
+		echo '<tr><th></th><td>'; self::c( 'engine_direct', 'Use the direct Google dispatcher', 'One sender for DX events, using WooCommerce product IDs and prices. Works while GTM is off. No DOM price scraping or inferred customer segments.' ); echo '</td></tr>';
+		echo '<tr><th></th><td>'; self::c( 'ga4_server_purchase', 'Use GA4 server delivery for thank-you purchases', 'When enabled, DX suppresses its browser GA4 purchase. Status-triggered purchases and refunds always use the server. Requires a Measurement Protocol secret. Disable any duplicate purchase tags in GTM.' ); echo '</td></tr>';
 		if ( DXPS_Helpers::on( 'engine_direct' ) ) {
 			echo '<tr><th>Status</th><td><strong>' . ( DXPS_Helpers::engine_direct() ? 'Active' : 'Not active' ) . '</strong>' . ( DXPS_Helpers::engine_direct() ? '' : ' - turn GTM off and enable GA4 and/or Google Ads with their IDs.' ) . '</td></tr>';
 		}
@@ -183,7 +189,7 @@ class DXPS_Settings {
 		}
 		echo '</select><p class="description">The value sent with Purchase to every platform. Choose the net option to optimise ads on what you actually receive.</p></td></tr>';
 		echo '</table><h2>Events</h2><table class="form-table">';
-		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror browser events through Meta CAPI + GA4 MP', 'First-party, deduplicated by event_id — recovers ad-blocker/iOS losses. Relayed events carry the validated, hashed customer data that is actually available (email, phone, name, city, state, ZIP, country, external ID, Facebook Login ID). Date of birth and gender are never inferred or sent.' ); echo '</td></tr>';
+		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror consented browser events through Meta CAPI', 'Meta browser/server copies share an event ID. GA4 browser events are not mirrored; server purchases, refunds and account events have one delivery owner.' ); echo '</td></tr>';
 		echo '<tr><th>Leads</th><td>'; self::c( 'track_leads', 'WhatsApp / phone / email clicks → Lead' ); echo '</td></tr>';
 		echo '<tr><th>Search</th><td>'; self::c( 'track_search', 'Site search → Search' ); echo '</td></tr>';
 		echo '<tr><th>PageScroll</th><td>'; self::c( 'track_scroll', 'Scroll depth at 25 / 50 / 75 / 90% → PageScroll (Meta) + scroll (GA4)', 'Great for engaged-visitor custom audiences.' ); echo '</td></tr>';
@@ -262,10 +268,10 @@ class DXPS_Settings {
 	private static function tab_consent() {
 		echo '<h2>Consent Mode v2</h2><table class="form-table"><tr><th></th><td>';
 		self::c( 'consent_mode', 'Enable Consent Mode v2',
-			'<strong>ON:</strong> Google tags default to <em>denied</em> for EEA/UK/CH visitors (required for your HR/SI/DE traffic) and <em>granted</em> elsewhere — BA/RS visitors are unaffected. Meta Pixel is held for EEA visitors until your banner calls <code>dxpsConsent(\'granted\')</code>. Server relay respects the same consent state.<br><strong>OFF:</strong> everything fires immediately for everyone.' );
+			'<strong>ON:</strong> Google consent defaults to denied globally; DX marketing events and customer matching require your banner to call <code>dxpsConsent(\'granted\')</code>. Unknown location and cached pages follow the same rule. <code>dxpsConsent(\'denied\')</code> withdraws consent and clears DX identity/matching storage.<br><strong>OFF:</strong> events may run without an explicit grant, but an explicit denial is still respected. Connect your consent banner before enabling tracking.' );
 		echo '</td></tr></table>';
 		echo '<h2>Privacy hard rules (always active)</h2><ul style="list-style:disc;margin-left:20px">
-			<li>All customer data is SHA-256 hashed before transmission (Meta/Google spec).</li>
+			<li>Matching identity fields use platform-specific SHA-256 normalization. Browser IDs, IP/UA and allowed Google address components follow the respective platform specifications.</li>
 			<li>Coupons matching the excluded keywords never reach any platform.</li>
 			<li>DX suppresses recognized sensitive-health contexts and excludes free-text fields; review custom integrations and destinations separately.</li></ul>';
 	}
@@ -340,7 +346,7 @@ class DXPS_Settings {
 			array( 'GA4 API secret filled', '_ga4_secret', null, 'Required for Measurement Protocol.' ),
 			array( 'Google Ads + Enhanced Conversions', 'gads_enabled', 1, 'Enable direct Ads only with valid IDs/labels and a single conversion owner; match-quality gains vary.' ),
 			array( 'GTM', 'gtm_enabled', 0, 'Keep ON if GTM owns Google tracking; GTM-only suppresses DX direct Google dispatch, not DX Meta.' ),
-			array( 'Consent Mode v2', 'consent_mode', 1, 'ON — mandatory for your EU traffic (HR/SI/DE); BA/RS unaffected.' ),
+			array( 'Consent Mode v2', 'consent_mode', 1, 'ON — require consent globally, including when location is unknown.' ),
 			array( 'Purchase trigger = order status', '_purchase_status', null, 'COD store: fire on Completed, not thank-you — kills conversions from failed pouzeće orders.' ),
 			array( 'Server relay', 'server_relay', 1, 'Uses validated, consent-allowed matching fields and minimized Meta parameters; actual coverage depends on available customer data.' ),
 			array( 'Lead clicks (WhatsApp/tel/mail)', 'track_leads', 1, 'ON — WhatsApp is your biggest untracked conversion path.' ),
