@@ -92,7 +92,18 @@ class DXPS_Tracking {
 		if ( $blocked ) { $meta = ''; $ga4 = ''; $aw = ''; $gtm = ''; }
 
 		echo "\n<!-- DX Pixel Suite v" . esc_html( DXPS_VERSION ) . " -->\n";
-		echo "<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}window.dxpsQ=[];gtag('set','page_location',location.origin+location.pathname.replace(/\\/(order-received|order-pay)\\/\\d+\\/?$/, '/'));gtag('set','page_title','Website');try{var dxRef=new URL(document.referrer);gtag('set','page_referrer',dxRef.origin+dxRef.pathname)}catch(e){gtag('set','page_referrer','')}</script>\n";
+		// page_location keeps the path plus campaign / click-ID parameters only. Dropping the whole query string (as
+		// before 2.2.0) removed utm_* and gclid too, so GA4 reported paid and e-mail traffic as direct or referral.
+		// Every other parameter (which may carry personal data) is still removed.
+		$title_js = DXPS_Helpers::on( 'ga4_page_titles' ) ? '' : "gtag('set','page_title','Website');";
+		echo <<<'DXPS_PAGE_URL'
+<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}window.dxpsQ=[];
+window.dxpsPageUrl=function(){var keep=/^(utm_(source|medium|campaign|term|content|id|source_platform|creative_format|marketing_tactic)|gclid|gbraid|wbraid|dclid|gclsrc|gad_source|gad_campaignid|msclkid|srsltid|_gl)$/,q=[];try{new URLSearchParams(location.search).forEach(function(v,k){if(keep.test(k)&&v&&v.length<=500)q.push(encodeURIComponent(k)+'='+encodeURIComponent(v))})}catch(e){}return location.origin+location.pathname.replace(/\/(order-received|order-pay)\/\d+\/?$/,'/')+(q.length?'?'+q.join('&'):'')};
+gtag('set','page_location',window.dxpsPageUrl());try{var dxRef=new URL(document.referrer);gtag('set','page_referrer',dxRef.origin+dxRef.pathname)}catch(e){gtag('set','page_referrer','')}
+</script>
+
+DXPS_PAGE_URL;
+		if ( $title_js ) echo '<script>' . $title_js . "</script>\n";
 
 		/* ---- Consent Mode v2 default (before any tag) ---- */
 		if ( DXPS_Helpers::on( 'consent_mode' ) ) {
@@ -128,7 +139,7 @@ if(typeof w.fbq==='function')w.fbq('consent',g?'grant':'revoke');
 if(g){if(w.dxpsInitIdentity)w.dxpsInitIdentity();if(w.dxpsInitMeta)w.dxpsInitMeta();}
 else{
  if(w.dxpsCfg&&w.dxpsCfg.forgetUrl)fetch(w.dxpsCfg.forgetUrl,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:'{}'}).catch(function(){});
- ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lp','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
+ ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lt','_dxps_lp','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
  try{sessionStorage.removeItem('eh_customer_hashes');Object.keys(localStorage).forEach(function(k){if(k.indexOf('eh_')===0||k.indexOf('dxps_')===0)localStorage.removeItem(k)})}catch(e){}
  w.__ehHashedCustomerData=null;w.dxpsQ=[];gtag('set','user_data',null);
 }
@@ -164,7 +175,7 @@ DXPS_CONSENT_BRIDGE;
 			$ldu = DXPS_Helpers::on( 'meta_ldu' ) ? "fbq('dataProcessingOptions',['LDU'],0,0);" : '';
 			echo "<script>
 window.dxpsMetaReady=false;
-window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}fbq('init','{$px}'{$adv});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
+window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}var x='';try{var m=document.cookie.match(/(?:^|;\\s*)pbid=([a-f0-9]{32,64})(?:;|$)/i);if(m)x=m[1].toLowerCase();else{var a=crypto.getRandomValues(new Uint8Array(16));for(var i=0;i<16;i++)x+=('0'+a[i].toString(16)).slice(-2);document.cookie='pbid='+x+';path=/;max-age=31536000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');}}catch(e){x=''}fbq('init','{$px}',x?{external_id:x}:{});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
 </script>\n";
 			if ( DXPS_Helpers::marketing_allowed() ) {
 				echo "<script>window.dxpsInitMeta();</script>\n";
@@ -213,6 +224,16 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			'ga4ServerPurchase' => DXPS_Helpers::ga4_server_allowed( 'purchase' ),
 			'forgetUrl' => esc_url_raw( rest_url( 'dxps/v1/forget' ) ),
 			'adsId'     => $aw,
+			// 2.2.0: Google Ads cart data (ties conversions to Merchant Center products) + dynamic remarketing (opt-in).
+			'adsMerchant' => ( $aw && preg_match( '/^[0-9]{3,15}$/', (string) DXPS_Helpers::opt( 'gads_merchant_id' ) ) ) ? array_filter( array(
+				'id'      => (int) DXPS_Helpers::opt( 'gads_merchant_id' ),
+				'country' => preg_match( '/^[A-Za-z]{2}$/', (string) DXPS_Helpers::opt( 'gads_feed_country' ) ) ? strtoupper( DXPS_Helpers::opt( 'gads_feed_country' ) ) : '',
+				'lang'    => preg_match( '/^[A-Za-z]{2}$/', (string) DXPS_Helpers::opt( 'gads_feed_language' ) ) ? strtoupper( DXPS_Helpers::opt( 'gads_feed_language' ) ) : '',
+			) ) : null,
+			'adsRemarketing' => ( $aw && DXPS_Helpers::on( 'gads_remarketing' ) ) ? 1 : 0,
+			'pageTitles' => DXPS_Helpers::on( 'ga4_page_titles' ) ? 1 : 0,
+			// Same value the server sends with Measurement Protocol events (GA4 User-ID, no personal data).
+			'uid'       => ( is_user_logged_in() && DXPS_Helpers::marketing_allowed() ) ? 'u' . get_current_user_id() : '',
 			'ctx'       => $ctx,
 			'forms'     => DXPS_Helpers::on( 'track_forms' ) ? 1 : 0,
 			'downloads' => DXPS_Helpers::on( 'track_downloads' ) ? 1 : 0,
@@ -318,7 +339,7 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			$item = DXPS_Helpers::product_item( wc_get_product( get_the_ID() ) );
 			if ( $item ) $events[] = array( 'name' => 'view_item', 'params' => array(
 				'items' => array( $item ), 'value' => $item['price'], 'content_type' => $item['content_type'],
-				'category_name' => $item['category'],
+				'category_name' => $item['category'] ?? '',
 				'tags' => implode( ', ', wc_get_product_terms( get_the_ID(), 'product_tag', array( 'fields' => 'names' ) ) ),
 			), 'event_id' => DXPS_Helpers::event_id( 'view_item' ) );
 		} elseif ( is_product_category() || is_shop() || is_product_tag() || is_search() ) {
@@ -459,6 +480,10 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 		$order->update_meta_data( '_dxps_ip',  DXPS_Helpers::client_ip() );
 		if ( ! empty( $_COOKIE[ DXPS_Helpers::UTM_COOKIE ] ) ) {
 			$order->update_meta_data( '_dxps_utm', sanitize_text_field( wp_unslash( $_COOKIE[ DXPS_Helpers::UTM_COOKIE ] ) ) );
+		}
+		// Last-touch campaign / click IDs (gclid, gbraid, wbraid, msclkid ...): what an offline-conversion upload needs.
+		if ( ! empty( $_COOKIE['_dxps_lt'] ) && is_string( $_COOKIE['_dxps_lt'] ) ) {
+			$order->update_meta_data( '_dxps_utm_last', substr( sanitize_text_field( wp_unslash( $_COOKIE['_dxps_lt'] ) ), 0, 2000 ) );
 		}
 	}
 }

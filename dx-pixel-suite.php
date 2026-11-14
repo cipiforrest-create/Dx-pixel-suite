@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: WooCommerce and content tracking with Meta Pixel/CAPI, GA4, Google Ads, consent controls and scheduled product catalogues for Google, Meta, Pinterest and Microsoft.
- * Version:     2.1.0
+ * Version:     2.2.0
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '2.1.0' );
+define( 'DXPS_VERSION', '2.2.0' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -95,6 +95,12 @@ register_activation_hook( __FILE__, function () {
 		'content_read_scroll'   => 50,
 		'content_read_time'     => 30,
 		'geo_enrich'            => '',      // '' | country | full
+		// 2.2.0
+		'gads_merchant_id'      => '',      // Merchant Center ID: cart data on the Google Ads purchase conversion
+		'gads_feed_country'     => '',
+		'gads_feed_language'    => '',
+		'gads_remarketing'      => 0,       // Google Ads dynamic remarketing events (opt-in)
+		'ga4_page_titles'       => 0,       // send the real browser title to GA4 (opt-in)
 	);
 	$existing = get_option( 'dxps_settings', array() );
 	update_option( 'dxps_settings', array_merge( $defaults, (array) $existing ) );

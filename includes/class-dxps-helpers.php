@@ -282,7 +282,9 @@ class DXPS_Helpers {
 			$src = (array) json_decode( urldecode( wp_unslash( $_COOKIE[ self::UTM_COOKIE ] ) ), true );
 		}
 		if ( ! empty( $src['utm_source'] ) ) return sanitize_text_field( $src['utm_source'] . ( empty( $src['utm_medium'] ) ? '' : ' / ' . $src['utm_medium'] ) );
-		if ( ! empty( $src['gclid'] ) )  return 'google / cpc';
+		if ( ! empty( $src['gclid'] ) || ! empty( $src['gbraid'] ) || ! empty( $src['wbraid'] ) ) return 'google / cpc';
+		if ( ! empty( $src['msclkid'] ) ) return 'bing / cpc';
+		if ( ! empty( $src['ttclid'] ) )  return 'tiktok / paid';
 		if ( ! empty( $src['fbclid'] ) ) return 'facebook / paid';
 		$ref = isset( $_SERVER['HTTP_REFERER'] ) ? wp_parse_url( $_SERVER['HTTP_REFERER'], PHP_URL_HOST ) : '';
 		if ( ! $ref || false !== strpos( (string) $ref, wp_parse_url( home_url(), PHP_URL_HOST ) ) ) return 'direct';
@@ -293,9 +295,19 @@ class DXPS_Helpers {
 
 	/* ---------------- First-party identifiers ---------------- */
 
+	/**
+	 * The Meta pixel hashes the browser ID before sending it, except when it already looks like a SHA-256
+	 * (64 hex characters, e.g. a cookie left by PixelYourSite) - then it is sent unchanged. Mirror that here,
+	 * otherwise browser and server would report two different external IDs for the same visitor.
+	 */
+	private static function eid_hash( $cookie ) {
+		$v = strtolower( $cookie );
+		return 64 === strlen( $v ) ? $v : hash( 'sha256', $v );
+	}
+
 	public static function external_id() {
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return hash( 'sha256', strtolower( $_COOKIE[ $c ] ) );
+			if ( ! empty( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return self::eid_hash( $_COOKIE[ $c ] );
 		}
 		return is_user_logged_in() ? hash( 'sha256', 'dxps.user.' . get_current_user_id() ) : '';
 	}
@@ -304,7 +316,7 @@ class DXPS_Helpers {
 	public static function external_ids() {
 		$ids = array();
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = hash( 'sha256', strtolower( $_COOKIE[ $c ] ) ); break; }
+			if ( ! empty( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = self::eid_hash( $_COOKIE[ $c ] ); break; }
 		}
 		if ( is_user_logged_in() ) $ids[] = hash( 'sha256', 'dxps.user.' . get_current_user_id() );
 		return array_values( array_unique( $ids ) );
@@ -345,7 +357,7 @@ class DXPS_Helpers {
 		$remembered = self::recalled_user_data();
 		if ( ! empty( $remembered['em'] ) && ! empty( $live['em'] ) && $remembered['em'] !== $live['em'] ) $remembered = array();
 		$data = array_merge( $remembered, $live );
-		if ( $live ) self::remember_user_data( $data );
+		if ( $live && $data != $remembered ) self::remember_user_data( $data );
 		return $data;
 	}
 
@@ -379,32 +391,54 @@ class DXPS_Helpers {
 		return (string) $product->get_id();
 	}
 
+	/** A descriptive label, or '' when it would reveal a health condition (never sent to any platform). */
+	public static function safe_label( $text ) {
+		$text = trim( wp_strip_all_tags( (string) $text ) );
+		return ( '' === $text || self::sensitive_context( '', array( $text ) ) ) ? '' : $text;
+	}
+
+	/** Brand for product events: the product's own catalogue brand, else the configured store brand. */
+	public static function item_brand( $product, $parent_id = 0 ) {
+		if ( ! self::on( 'track_brand' ) ) return '';
+		$brand = $product ? (string) $product->get_meta( '_dxps_brand' ) : '';
+		if ( '' === $brand && $parent_id && function_exists( 'wc_get_product' ) && ( $parent = wc_get_product( $parent_id ) ) ) $brand = (string) $parent->get_meta( '_dxps_brand' );
+		return self::safe_label( '' !== $brand ? $brand : self::opt( 'brand_name', 'Eynna Hair' ) );
+	}
+
+	/** First product category of the (parent) product. Variations have no categories of their own. */
+	private static function item_category( $product_id ) {
+		$cats = wc_get_product_terms( $product_id, 'product_cat', array( 'fields' => 'names' ) );
+		return ( is_wp_error( $cats ) || ! $cats ) ? '' : self::safe_label( $cats[0] );
+	}
+
 	public static function product_item( $product, $qty = 1 ) {
 		if ( ! $product instanceof WC_Product ) return null;
-		$cats = wc_get_product_terms( $product->get_id(), 'product_cat', array( 'fields' => 'names' ) );
-		return array(
+		$parent_id = $product->is_type( 'variation' ) ? $product->get_parent_id() : 0;
+		return array_filter( array(
 			'id'       => self::pid( $product ),
 			'content_type' => $product->is_type( 'variable' ) ? 'product_group' : 'product',
-			'brand'    => self::on( 'track_brand' ) ? self::opt( 'brand_name', 'Eynna Hair' ) : '',
+			'brand'    => self::item_brand( $product, $parent_id ),
 			'name'     => $product->get_name(),
 			'price'    => (float) wc_get_price_to_display( $product ),
 			'quantity' => (int) $qty,
-			'category' => $cats ? $cats[0] : '',
-		);
+			'category' => self::item_category( $parent_id ?: $product->get_id() ),
+			'variant'  => $parent_id ? self::safe_label( wc_get_formatted_variation( $product, true, false, false ) ) : '',
+		), function ( $v ) { return '' !== $v; } );
 	}
 
 	public static function order_items( $order ) {
 		$items = array();
 		foreach ( $order->get_items() as $it ) {
 			$p = $it->get_product();
-			$items[] = array(
+			$items[] = array_filter( array(
 				'id'       => $p ? self::pid( $p ) : (string) $it->get_product_id(),
-				'brand'    => self::on( 'track_brand' ) ? self::opt( 'brand_name', 'Eynna Hair' ) : '',
+				'brand'    => self::item_brand( $p, $it->get_variation_id() ? $it->get_product_id() : 0 ),
 				'name'     => $it->get_name(),
 				'price'    => (float) $order->get_item_total( $it, true ),
 				'quantity' => (int) $it->get_quantity(),
-				'category' => '',
-			);
+				'category' => $it->get_product_id() ? self::item_category( $it->get_product_id() ) : '',
+				'variant'  => ( $p && $p->is_type( 'variation' ) ) ? self::safe_label( wc_get_formatted_variation( $p, true, false, false ) ) : '',
+			), function ( $v ) { return '' !== $v; } );
 		}
 		return $items;
 	}
@@ -447,6 +481,7 @@ class DXPS_Helpers {
 			'coupon_name'        => implode( ',', $safe_coupons ),
 			'tags'               => implode( ', ', array_slice( array_unique( $tags ), 0, 10 ) ),
 			'payment_method'     => $order->get_payment_method_title(),
+			'discount'           => (float) $order->get_discount_total(),
 		);
 	}
 

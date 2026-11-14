@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) exit;
  */
 class DXPS_Server {
 
-	const META_API_VERSION = 'v21.0'; // override with the dxps_meta_api_version filter
+	const META_API_VERSION = 'v25.0'; // override with the dxps_meta_api_version filter
 	const GA4_API  = 'https://www.google-analytics.com/mp/collect';
 
 	public static function init() {
@@ -97,7 +97,7 @@ class DXPS_Server {
 
 	/** Same-origin + rate-limit guard shared by both public endpoints. */
 	private static function guard( WP_REST_Request $req ) {
-		if ( strlen( $req->get_body() ) > 32768 || DXPS_Helpers::excluded_role() ) return false;
+		if ( strlen( $req->get_body() ) > 65536 || DXPS_Helpers::excluded_role() ) return false;
 		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
 		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
 		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
@@ -149,45 +149,61 @@ class DXPS_Server {
 		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok'=>false ), 403 );
 		if ( ! DXPS_Helpers::on( 'server_relay' ) || ! DXPS_Helpers::marketing_allowed() ) return new WP_REST_Response( array( 'ok'=>true,'skipped'=>'disabled_or_consent' ) );
 
-		foreach ( array( 'name','event_id','url' ) as $key ) if ( ! is_string( $req->get_param( $key ) ) ) return new WP_REST_Response( array( 'ok'=>false ), 400 );
-		if ( ! is_array( $req->get_param( 'params' ) ) ) return new WP_REST_Response( array( 'ok'=>false ), 400 );
-		$name     = sanitize_text_field( $req->get_param( 'name' ) );
-		$event_id = sanitize_text_field( $req->get_param( 'event_id' ) );
-		if ( DXPS_Helpers::sensitive_context( (string) $req->get_param( 'url' ), $req->get_param( 'params' ) ) ) return new WP_REST_Response( array( 'ok'=>true,'skipped'=>'sensitive_context' ) );
-		$params = self::relay_params( $req->get_param( 'params' ) );
-		if ( is_wp_error( $params ) ) return new WP_REST_Response( array( 'ok'=>false,'error'=>'invalid_parameters' ), 400 );
-		$url      = esc_url_raw( $req->get_param( 'url' ) );
-		if ( DXPS_Helpers::sensitive_context( $url, $params ) || DXPS_Helpers::sensitive_context( $name ) ) return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'sensitive_context' ), 200 );
-		$url = DXPS_Helpers::safe_event_url( $url );
-		unset( $params['_dxps_marketing_allowed'], $params['_dxps_event_time'] );
+		// 2.2.0: the browser sends its events in small batches ({events:[...]}); one request, one Conversions API call.
+		// A single event object (the pre-2.2 shape, still used by cached pages) is accepted as a batch of one.
+		$body = $req->get_json_params();
+		if ( ! is_array( $body ) ) $body = array( 'name'=>$req->get_param( 'name' ), 'event_id'=>$req->get_param( 'event_id' ), 'url'=>$req->get_param( 'url' ), 'params'=>$req->get_param( 'params' ) );
+		$list = array_key_exists( 'events', $body ) ? $body['events'] : array( $body );
+		if ( ! is_array( $list ) || ! $list || count( $list ) > 20 ) return new WP_REST_Response( array( 'ok'=>false ), 400 );
 
-		$allowed = array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'purchase', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'login', 'sign_up', 'comment', 'outbound_click', 'view_content', 'view_content_list', 'content_engaged' );
-		foreach ( self::custom_event_names() as $ce ) $allowed[] = $ce;
-		if ( ! in_array( $name, $allowed, true ) || ! preg_match( '/^[A-Za-z0-9_.:-]{1,100}$/', $event_id ) ) {
-			return new WP_REST_Response( array( 'ok' => false ), 400 );
+		$meta_ready = DXPS_Helpers::on( 'meta_enabled' ) && DXPS_Helpers::opt( 'meta_pixel_id' ) && DXPS_Helpers::opt( 'meta_capi_token' );
+		$allowed    = array_merge( array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'outbound_click', 'view_content', 'view_content_list', 'content_engaged' ), self::custom_event_names() );
+		// Purchases and account events are sent by the server itself from authoritative data, never relayed.
+		$server_owned = array( 'purchase', 'login', 'sign_up', 'comment' );
+
+		$events = array(); $names = array(); $skipped = array(); $user = null; $matching = array();
+		foreach ( $list as $e ) {
+			if ( ! is_array( $e ) || ! is_string( $e['name'] ?? null ) || ! is_string( $e['event_id'] ?? null ) || ! is_string( $e['url'] ?? null ) || ! is_array( $e['params'] ?? null ) ) return new WP_REST_Response( array( 'ok'=>false ), 400 );
+			$name = sanitize_text_field( $e['name'] ); $event_id = sanitize_text_field( $e['event_id'] );
+			if ( in_array( $name, $server_owned, true ) ) { $skipped[] = 'server_owned'; continue; }
+			if ( ! in_array( $name, $allowed, true ) || ! preg_match( '/^[A-Za-z0-9_.:-]{1,100}$/', $event_id ) ) return new WP_REST_Response( array( 'ok'=>false ), 400 );
+			if ( DXPS_Helpers::sensitive_context( $e['url'], $e['params'] ) || DXPS_Helpers::sensitive_context( $name ) ) { $skipped[] = 'sensitive_context'; continue; }
+			$params = self::relay_params( $e['params'] );
+			if ( is_wp_error( $params ) ) return new WP_REST_Response( array( 'ok'=>false,'error'=>'invalid_parameters' ), 400 );
+			if ( ! $meta_ready ) { $skipped[] = 'disabled'; continue; }
+			if ( null === $user ) {
+				$matching = DXPS_Helpers::user_data_full();
+				// Geo fill-in (opt-in) goes first, so anything the customer actually gave overrides it.
+				$user = array_merge( DXPS_Helpers::geo_hashes(), $matching, array_filter( array(
+					'client_ip_address' => self::ip(),
+					'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
+					'fbp'               => DXPS_Helpers::fbp(),
+					'fbc'               => DXPS_Helpers::fbc(),
+					'external_id'       => DXPS_Helpers::external_ids(),
+				) ) );
+			}
+			$meta_name = self::meta_event_name( $name );
+			$built     = self::meta_event( $meta_name, $params, $event_id, $user, DXPS_Helpers::safe_event_url( esc_url_raw( $e['url'] ) ) );
+			if ( empty( $built['event'] ) ) { $skipped[] = $built['status']; continue; }
+			$events[] = $built['event']; $names[] = $meta_name;
 		}
-		// purchase relays only in thankyou mode (status mode sends its own).
-		if ( 'purchase' === $name || in_array( $name, array( 'login','sign_up','comment' ), true ) ) {
-			return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'server_owned' ), 200 );
+
+		// Meta deduplicates on event_name + event_id, so a repeated relay of the same event needs no local lock or marker.
+		$meta = $events ? self::meta_post( $events ) : array( 'ok'=>false, 'status'=>$skipped ? $skipped[0] : 'empty' );
+		if ( $events ) {
+			DXPS_Helpers::log( 'CAPI relay', $meta + array( 'events'=>$names, 'user_data_fields'=>array_keys( $user ) ) );
+			foreach ( $events as $i => $ev ) DXPS_Helpers::log_event( array( 'e'=>$names[ $i ], 'ok'=>$meta['ok'] ? 1 : 0, 's'=>$meta['status'], 'f'=>array_keys( $ev['user_data'] ), 'v'=>isset( $ev['custom_data']['value'] ) ? 1 : 0 ) );
 		}
-
-		if ( ! DXPS_Helpers::on( 'meta_enabled' ) && ! DXPS_Helpers::on( 'ga4_enabled' ) ) return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'disabled' ), 200 );
-
-		// Geo fill-in (opt-in) goes first, so anything the customer actually gave overrides it.
-		$user = array_merge( DXPS_Helpers::geo_hashes(), DXPS_Helpers::user_data_full(), array_filter( array(
-			'client_ip_address' => self::ip(),
-			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
-			'fbp'               => DXPS_Helpers::fbp(),
-			'fbc'               => DXPS_Helpers::fbc(),
-			'external_id'       => DXPS_Helpers::external_ids(),
-		) ) );
-
-		$lock = DXPS_Jobs::lock( 'relay-' . $name . '-' . $event_id, 30 );
-		if ( ! $lock ) return new WP_REST_Response( array( 'ok'=>false,'status'=>'busy' ), 429 );
-		try { $meta = self::send_meta( self::meta_event_name( $name ), $params, $event_id, $user, $url ); } finally { DXPS_Jobs::unlock( $lock ); }
-		// Meta-only PageView must not create a second GA4 page_view.
-		$ga4 = 'page_view' === $name ? array( 'ok' => false, 'status' => 'meta_only' ) : self::send_ga4( $name, $params, DXPS_Helpers::ga_client_id() );
-		return new WP_REST_Response( array( 'ok' => ! empty( $meta['ok'] ) || ! empty( $ga4['ok'] ), 'delivery' => array( 'meta' => $meta, 'ga4' => $ga4 ) ), 200 );
+		$out = array( 'ok'=>! empty( $meta['ok'] ), 'sent'=>! empty( $meta['ok'] ) ? count( $events ) : 0, 'skipped'=>array_values( array_unique( $skipped ) ), 'delivery'=>array( 'meta'=>array_intersect_key( $meta, array_flip( array( 'ok','status','http_status','events_received','error_code' ) ) ) ) );
+		// Hand the visitor's own (already hashed) matching fields back to the pixel, so browser events carry the same
+		// customer information as the server copies. Never placed in cacheable HTML; only in this private POST response.
+		if ( DXPS_Helpers::on( 'auto_am' ) && $matching ) {
+			$am = array_intersect_key( $matching, array_flip( array( 'em','ph','fn','ln','ct','st','zp','country' ) ) );
+			if ( $am ) $out['am'] = $am;
+		}
+		$res = new WP_REST_Response( $out, 200 );
+		$res->header( 'Cache-Control', 'no-store, private' );
+		return $res;
 	}
 
 	private static function relay_params( $input ) {
@@ -296,9 +312,29 @@ class DXPS_Server {
 		// A valid test code is permitted only in an authenticated administrator AJAX request.
 		$diagnostic = $test_code && preg_match( '/^TEST[0-9]{1,30}$/', $test_code ) && wp_doing_ajax() && current_user_can( 'manage_options' );
 		if ( $test_code && ! $diagnostic ) return array( 'ok' => false, 'status' => 'forbidden_test' );
-		if ( ! $diagnostic && get_transient( 'dxps_sent_' . md5( $pixel . '|' . $event_name . '|' . $event_id ) ) ) return array( 'ok'=>true,'status'=>'already_accepted' );
+		// Order events can be retried by several workers; remember an accepted one. Page events rely on Meta's own
+		// event_id deduplication instead of two database rows per event.
+		$marker = ( ! $diagnostic && 'Purchase' === $event_name ) ? 'dxps_sent_' . md5( $pixel . '|' . $event_name . '|' . $event_id ) : '';
+		if ( $marker && get_transient( $marker ) ) return array( 'ok'=>true,'status'=>'already_accepted' );
 		if ( ! $diagnostic && ! DXPS_Helpers::on( 'meta_enabled' ) ) return array( 'ok' => false, 'status' => 'disabled' );
 		if ( ! $pixel || ! $token ) return array( 'ok' => false, 'status' => 'not_configured' );
+
+		$built = self::meta_event( $event_name, $params, $event_id, $user_data, $url, $diagnostic );
+		if ( empty( $built['event'] ) ) return $built;
+		$result = self::meta_post( array( $built['event'] ), $diagnostic ? $test_code : '' );
+		if ( $marker && ! empty( $result['ok'] ) ) set_transient( $marker, 1, 2 * DAY_IN_SECONDS );
+		$user_data = $built['event']['user_data']; $custom = $built['event']['custom_data'];
+		// Never log the access-token URL, raw API body, or customer data.
+		DXPS_Helpers::log( 'CAPI ' . $event_name, $result + array( 'user_data_fields'=>array_keys( $user_data ), 'custom_data_fields'=>array_keys( $custom ) ) );
+		if ( ! $diagnostic ) DXPS_Helpers::log_event( array( 'e' => $event_name, 'ok' => $result['ok'] ? 1 : 0, 's' => $result['status'], 'f' => array_keys( $user_data ), 'v' => isset( $custom['value'] ) ? 1 : 0 ) );
+		return $result;
+	}
+
+	/**
+	 * Validate one event and build its Conversions API payload.
+	 * Returns array( 'event' => payload ) or array( 'ok' => false, 'status' => reason ).
+	 */
+	private static function meta_event( $event_name, $params, $event_id, $user_data, $url = '', $diagnostic = false ) {
 		$allowed = array_key_exists( '_dxps_marketing_allowed', $params ) ? (bool) $params['_dxps_marketing_allowed'] : DXPS_Helpers::marketing_allowed();
 		if ( ! $allowed ) return array( 'ok' => false, 'status' => 'consent' );
 
@@ -350,15 +386,19 @@ class DXPS_Server {
 			$event['data_processing_options_country'] = 0;
 			$event['data_processing_options_state']   = 0;
 		}
+		return array( 'event' => $event );
+	}
 
-		$body = array( 'data' => array( $event ) );
-		if ( $diagnostic ) $body['test_event_code'] = $test_code;
+	/** One Conversions API request for one or more prepared events. */
+	private static function meta_post( $events, $test_code = '' ) {
+		$body = array( 'data' => array_values( $events ) );
+		if ( $test_code ) $body['test_event_code'] = $test_code;
 		elseif ( DXPS_Helpers::opt( 'meta_test_code' ) ) $body['test_event_code'] = DXPS_Helpers::opt( 'meta_test_code' );
 
 		$version = preg_replace( '/[^v0-9.]/', '', (string) apply_filters( 'dxps_meta_api_version', self::META_API_VERSION ) );
-		$res = wp_remote_post( 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . $pixel . '/events', array(
+		$res = wp_remote_post( 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . rawurlencode( DXPS_Helpers::opt( 'meta_pixel_id' ) ) . '/events', array(
 			'timeout' => 5,
-			'headers' => array( 'Content-Type' => 'application/json', 'Authorization'=>'Bearer ' . $token ),
+			'headers' => array( 'Content-Type' => 'application/json', 'Authorization'=>'Bearer ' . DXPS_Helpers::opt( 'meta_capi_token' ) ),
 			'body'    => wp_json_encode( $body ),
 		) );
 		if ( is_wp_error( $res ) ) {
@@ -370,11 +410,7 @@ class DXPS_Server {
 			$result = array( 'ok' => (bool) $accepted, 'status' => $accepted ? 'accepted' : 'rejected', 'http_status' => $http, 'events_received' => is_array( $json ) ? (int) ( $json['events_received'] ?? 0 ) : 0 );
 			if ( ! empty( $json['error']['code'] ) ) $result['error_code'] = (int) $json['error']['code'];
 		}
-		if ( ! $diagnostic && ! empty( $result['ok'] ) ) set_transient( 'dxps_sent_' . md5( $pixel . '|' . $event_name . '|' . $event_id ), 1, 2 * DAY_IN_SECONDS );
 		$result['retryable'] = ! $result['ok'] && ( empty( $result['http_status'] ) || 429 === $result['http_status'] || $result['http_status'] >= 500 );
-		// Never log the access-token URL, raw API body, or customer data.
-		DXPS_Helpers::log( 'CAPI ' . $event_name, $result + array( 'user_data_fields'=>array_keys( $user_data ), 'custom_data_fields'=>array_keys( $custom ) ) );
-		if ( ! $diagnostic ) DXPS_Helpers::log_event( array( 'e' => $event_name, 'ok' => $result['ok'] ? 1 : 0, 's' => $result['status'], 'f' => array_keys( $user_data ), 'v' => isset( $custom['value'] ) ? 1 : 0 ) );
 		return $result;
 	}
 
@@ -403,7 +439,7 @@ class DXPS_Server {
 		if ( ! empty( $params['coupon'] ) )         $p['coupon']         = $params['coupon'];
 
 		if ( ! empty( $params['item_list_name'] ) ) $p['item_list_name'] = $params['item_list_name'];
-		foreach ( array( 'post_type','post_id','percent_scrolled','time_on_page','lead_type','content_type','content_id','num_items','tax','shipping','new_customer','payment_method','session_id','engagement_time_msec' ) as $pk ) {
+		foreach ( array( 'post_type','post_id','percent_scrolled','time_on_page','lead_type','content_type','content_id','num_items','tax','shipping','discount','new_customer','payment_method','session_id','engagement_time_msec' ) as $pk ) {
 			if ( isset( $params[ $pk ] ) && '' !== $params[ $pk ] && is_scalar( $params[ $pk ] ) ) $p[ $pk ] = $params[ $pk ];
 		}
 		if ( ! empty( $params['items'] ) ) {
@@ -414,6 +450,8 @@ class DXPS_Server {
 					'price'         => isset( $i['price'] ) ? $i['price'] : 0,
 					'quantity'      => isset( $i['quantity'] ) ? $i['quantity'] : 1,
 					'item_category' => isset( $i['category'] ) ? $i['category'] : '',
+					'item_brand'    => isset( $i['brand'] ) ? $i['brand'] : '',
+					'item_variant'  => isset( $i['variant'] ) ? $i['variant'] : '',
 				) );
 			}, $params['items'] );
 		}
@@ -425,6 +463,10 @@ class DXPS_Server {
 		if ( null === $user_id ) $user_id = ( ! is_admin() && ! wp_doing_cron() && is_user_logged_in() ) ? get_current_user_id() : 0;
 		if ( $user_id > 0 ) $body['user_id'] = 'u' . (int) $user_id;
 		if ( ! empty( $params['_dxps_event_time'] ) ) $body['timestamp_micros'] = (int) $params['_dxps_event_time'] * 1000000;
+		// Without an IP the Measurement Protocol reports no country/city for server events. Order events use the
+		// address saved at checkout; front-end requests use the visitor's own. Never the administrator's or cron's.
+		$geo_ip = ! empty( $params['_dxps_ip'] ) ? $params['_dxps_ip'] : ( ( ! is_admin() && ! wp_doing_cron() && empty( $params['_dxps_event_time'] ) ) ? self::ip() : '' );
+		if ( is_string( $geo_ip ) && filter_var( $geo_ip, FILTER_VALIDATE_IP ) ) $body['ip_override'] = $geo_ip;
 		$body['consent'] = array( 'ad_user_data'=>'GRANTED', 'ad_personalization'=>'GRANTED' );
 		if ( ! empty( $user_data_ga['address'] ) ) $user_data_ga['address'] = array( $user_data_ga['address'] );
 		if ( $user_data_ga )       $body['user_data'] = $user_data_ga; // GA4 user-provided data.
@@ -494,6 +536,7 @@ class DXPS_Server {
 		$params['_dxps_event_time'] = $event_time;
 		if ( $order->get_meta( '_dxps_sid' ) ) $params['session_id'] = (int) $order->get_meta( '_dxps_sid' );
 		$params['engagement_time_msec'] = 1;
+		if ( $order->get_meta( '_dxps_ip' ) ) $params['_dxps_ip'] = (string) $order->get_meta( '_dxps_ip' );
 		$meta = $need_meta ? self::send_meta( 'Purchase', $params, $event_id, $user, $order->get_checkout_order_received_url() ) : array( 'ok' => false, 'status' => 'already_sent_or_disabled' );
 		if ( ! empty( $meta['ok'] ) ) $order->update_meta_data( '_dxps_meta_purchase_sent', 1 );
 
@@ -523,6 +566,7 @@ class DXPS_Server {
 			'currency'                => $order->get_currency(),
 			'_dxps_marketing_allowed' => true,
 		);
+		if ( $order->get_meta( '_dxps_ip' ) ) $params['_dxps_ip'] = (string) $order->get_meta( '_dxps_ip' );
 		$res = self::send_ga4( 'refund', $params, $order->get_meta( '_dxps_cid' ), array(), (int) $order->get_customer_id() );
 		if ( ! empty( $res['ok'] ) ) { $refund->update_meta_data( '_dxps_ga4_refund_sent', 1 ); $refund->save(); }
 		DXPS_Helpers::log( 'Refund delivery', array( 'order' => $order_id, 'ga4' => $res ) );

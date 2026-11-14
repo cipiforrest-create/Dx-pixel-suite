@@ -10,7 +10,40 @@
 	function safeUrl(v){try{var u=new URL(v,location.href);return u.origin===location.origin?u.origin+u.pathname.replace(/\/(order-received|order-pay)\/\d+\/?$/, '/') : location.origin+'/';}catch(e){return location.origin+'/';}}
 	function waitMatching(p){return Promise.race([Promise.resolve(p),new Promise(function(resolve){setTimeout(resolve,750)})]);}
 	function apiHeaders(){var h={'Content-Type':'application/json'};if(cfg.nonce)h['X-WP-Nonce']=cfg.nonce;return h;}
-	function relay(body,attempt){if(!cfg.relay||blocked(body.params)||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return Promise.resolve();return fetch(cfg.relay,{method:'POST',credentials:'same-origin',keepalive:true,headers:apiHeaders(),body:JSON.stringify(body)}).then(function(r){if((r.status===429||r.status>=500)&&!attempt)return new Promise(function(resolve){setTimeout(resolve,1000)}).then(function(){return relay(body,1)});return r;}).catch(function(){if(!attempt)return relay(body,1);});}
+	/* Server relay, batched (2.2.0): events fired close together travel in one request and one Conversions API
+	   call instead of one each. Flushed after a short pause and whenever the page is being left. */
+	var relayBuf=[],relayTimer=null,amSig='';
+	function allowed(){return !window.dxpsMarketingAllowed||window.dxpsMarketingAllowed();}
+	function applyAm(j){
+		// Hashed matching fields the server already holds for this visitor (logged-in profile, checkout, earlier forms).
+		// The pixel accepts SHA-256 values as they are, so browser events get the same match quality as server events.
+		if(!j||!j.am||!META_PIXEL||!window.dxpsMetaReady||typeof fbq!=='function'||!allowed())return;
+		var sig=JSON.stringify(j.am);if(sig===amSig)return;amSig=sig;try{fbq('init',META_PIXEL,j.am);}catch(e){}
+	}
+	function relaySend(body,attempt){
+		if(!allowed())return Promise.resolve();
+		return fetch(cfg.relay,{method:'POST',credentials:'same-origin',keepalive:true,headers:apiHeaders(),body:JSON.stringify(body)}).then(function(r){
+			// A cached page can carry an expired REST nonce; WordPress then rejects the request. Resend once without it.
+			if(r.status===403&&cfg.nonce){cfg.nonce='';return relaySend(body,attempt);}
+			if((r.status===429||r.status>=500)&&!attempt)return new Promise(function(resolve){setTimeout(resolve,1000)}).then(function(){return relaySend(body,1)});
+			if(r.ok)return r.json().then(applyAm).catch(function(){});
+		}).catch(function(){if(!attempt)return relaySend(body,1);});
+	}
+	function relayFlush(){
+		clearTimeout(relayTimer);relayTimer=null;
+		if(!relayBuf.length)return Promise.resolve();
+		var batch=relayBuf.splice(0,10);
+		return relaySend({events:batch},0).then(function(){if(relayBuf.length)return relayFlush();});
+	}
+	function relay(body){
+		if(!cfg.relay||body.name==='purchase'||blocked(body.params)||!allowed())return;
+		var p={};Object.keys(body.params||{}).forEach(function(k){if(k.charAt(0)!=='_')p[k]=body.params[k];});body.params=p;
+		relayBuf.push(body);
+		// Completed matching fields are flushed first so the first conversion can use them.
+		if(!relayTimer)relayTimer=setTimeout(function(){waitMatching(window.dxpsAmFlush?window.dxpsAmFlush():null).catch(function(){}).then(relayFlush);},350);
+	}
+	window.addEventListener('pagehide',relayFlush);
+	document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')relayFlush();});
 
 	/* ---------- identity cookies ---------- */
 	function getCookie(n) {
@@ -36,10 +69,12 @@
 	}
 	// UTM / click-id capture into first-party cookie (90 days, first-touch kept).
 	(function () {
-		var q = new URLSearchParams(location.search), keep = {}, keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid'];
-		keys.forEach(function (k) { if (q.get(k)) keep[k] = q.get(k); });
-		if (Object.keys(keep).length && !getCookie('_dxps_src')) {
-			setCookie('_dxps_src', encodeURIComponent(JSON.stringify(keep)), 90);
+		var q = new URLSearchParams(location.search), keep = {}, keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id', 'gclid', 'gbraid', 'wbraid', 'dclid', 'gad_source', 'gad_campaignid', 'msclkid', 'ttclid', 'fbclid'];
+		keys.forEach(function (k) { var v = q.get(k); if (v && v.length <= 300) keep[k] = v; });
+		if (Object.keys(keep).length) {
+			if (!getCookie('_dxps_src')) setCookie('_dxps_src', encodeURIComponent(JSON.stringify(keep)), 90); // first touch
+			keep.ts = Math.floor(Date.now() / 1000);
+			setCookie('_dxps_lt', encodeURIComponent(JSON.stringify(keep)), 90);                               // last touch
 		}
 		// A new ad click (different fbclid) replaces the stored click ID; the same click keeps its timestamp.
 		var fbclid = q.get('fbclid'), curFbc = getCookie('_fbc');
@@ -60,7 +95,8 @@
 	};
 	window.dxpsInitIdentity();
 	var googlePageSent=false;
-	function googlePageView(){if(googlePageSent||blocked()||!cfg.googleDirect||!cfg.ga4Id||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;googlePageSent=true;if(typeof gtag==='function')gtag('event','page_view',{send_to:cfg.ga4Id,page_location:safeUrl(location.href),page_title:(cfg.ctx&&cfg.ctx.post_type)||'page'});}
+	function googlePageView(){if(googlePageSent||blocked()||!cfg.googleDirect||!cfg.ga4Id||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;googlePageSent=true;if(typeof gtag==='function'){if(cfg.uid)gtag('set',{user_id:cfg.uid});gtag('event','page_view',{send_to:cfg.ga4Id,page_location:window.dxpsPageUrl?window.dxpsPageUrl():safeUrl(location.href),page_title:cfg.pageTitles?String(document.title||'').slice(0,300):((cfg.ctx&&cfg.ctx.post_type)||'page')});}}
+	if(cfg.uid&&cfg.gtmActive&&allowed()&&!blocked()){window.dataLayer=window.dataLayer||[];dataLayer.push({user_id:cfg.uid});}
 	googlePageView();
 
 	/* ---------- dispatcher ---------- */
@@ -88,7 +124,8 @@
 		if (p.items && p.items.length) {
 			out.content_type = p.content_type === 'product_group' ? 'product_group' : 'product';
 			out.content_ids = p.items.map(function (i) { return i.id; });
-			out.contents = p.items.map(function (i) { return { id: i.id, quantity: i.quantity || 1, item_price: i.price || 0 }; });
+			out.contents = p.items.map(function (i) { var c = { id: i.id, quantity: i.quantity || 1 }; if (typeof i.price === 'number') c.item_price = i.price; return c; });
+			out.num_items = p.items.reduce(function (n, i) { return n + (i.quantity || 1); }, 0);
 			// Catalog IDs and prices suffice; do not send descriptive product or condition text.
 		}
 		else if (p.content_id) {
@@ -142,13 +179,32 @@
 		if (scope !== 'meta_only' && cfg.googleDirect && p._gads_send_to && typeof gtag === 'function') {
 			if (p._ec) gtag('set', 'user_data', p._ec);
 			else if(window.__ehHashedCustomerData&&window.__ehHashedCustomerData.google)gtag('set','user_data',window.__ehHashedCustomerData.google);
-			gtag('event', 'conversion', {
+			var conv = {
 				send_to: p._gads_send_to,
 				value: p.value || 0,
 				currency: p.currency || cfg.currency,
 				transaction_id: p.transaction_id || '',
 				new_customer: p.new_customer
-			});
+			};
+			// Cart data: which catalogue products were bought. With a Merchant Center ID, Google Ads reports and
+			// optimises Shopping / Performance Max at product level. IDs are the same ones the DX feeds publish.
+			if (name === 'purchase' && p.items && p.items.length) {
+				conv.items = p.items.map(function (i) { return { id: i.id, quantity: i.quantity || 1, price: typeof i.price === 'number' ? i.price : 0 }; });
+				if (typeof p.discount === 'number' && p.discount > 0) conv.discount = p.discount;
+				if (cfg.adsMerchant) {
+					conv.aw_merchant_id = cfg.adsMerchant.id;
+					if (cfg.adsMerchant.country) conv.aw_feed_country = cfg.adsMerchant.country;
+					if (cfg.adsMerchant.lang) conv.aw_feed_language = cfg.adsMerchant.lang;
+				}
+			}
+			gtag('event', 'conversion', conv);
+		}
+		/* Google Ads dynamic remarketing (opt-in): product IDs for retail audiences and catalogue ads. */
+		if (cfg.adsRemarketing && cfg.googleDirect && cfg.adsId && scope !== 'meta_only' && typeof gtag === 'function' && p.items && p.items.length &&
+			{ view_item: 1, view_item_list: 1, add_to_cart: 1, view_cart: 1, begin_checkout: 1, purchase: 1 }[name]) {
+			var rmk = { send_to: cfg.adsId, items: p.items.map(function (i) { return { id: i.id, google_business_vertical: 'retail' }; }) };
+			if (typeof p.value === 'number') { rmk.value = p.value; rmk.currency = p.currency || cfg.currency; }
+			gtag('event', name, rmk);
 		}
 		// Status-mode purchases still reach Google via GTM; only the Meta browser/relay leg is suppressed.
 
@@ -162,7 +218,7 @@
 		// ones fill whatever budget is left, in priority order.
 		var GA4_PARAM_LIMIT = 25;
 		var coreKeys = ['items', 'value', 'currency', 'transaction_id', 'coupon', 'search_term', 'item_list_name',
-			'lead_type', 'new_customer', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'payment_method',
+			'lead_type', 'new_customer', 'num_items', 'total', 'subtotal', 'tax', 'shipping', 'discount', 'payment_method',
 			'content_type', 'content_id'];
 		var extraKeys = ['content_group', 'page_title', 'post_type', 'post_id', 'post_category', 'category_name', 'user_role',
 			'traffic_source', 'landing_page', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
@@ -178,7 +234,7 @@
 		});
 		if (!glp.currency && (name === 'purchase' || typeof glp.value !== 'undefined')) glp.currency = cfg.currency;
 		if (glp.items) glp.items = glp.items.map(function (i) {
-			return { item_id: i.id, item_name: i.name, price: i.price, quantity: i.quantity || 1, item_category: i.category || '', item_brand: i.brand || undefined, index: i.index };
+			return { item_id: i.id, item_name: i.name, price: i.price, quantity: i.quantity || 1, item_category: i.category || '', item_brand: i.brand || undefined, item_variant: i.variant || undefined, index: i.index };
 		});
 		if (skipGoogle) {
 			// nothing to send to Google
@@ -210,13 +266,13 @@
 		}
 
 		/* Flush completed matching fields first so the first conversion can use them. */
-		if (cfg.relay) waitMatching(amDelivery).catch(function(){}).then(function(){return relay({name:name,event_id:id,params:p,url:safeUrl(location.href)});});
+		relay({name:name,event_id:id,params:p,url:safeUrl(location.href)});
 	};
 
 	// Mirror DX's own Meta PageView only; do not emit another GA4/dataLayer page_view.
 	window.dxpsMetaPageView = function(id){
 		if (!META_PIXEL || blocked() || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;
-		waitMatching(window.dxpsAmFlush ? window.dxpsAmFlush() : null).catch(function(){}).then(function(){return relay({name:'page_view',event_id:id,params:{},url:safeUrl(location.href)});});
+		relay({name:'page_view',event_id:id,params:{},url:safeUrl(location.href)});
 	};
 	// Initial events run after the consented matching scan is installed.
 
@@ -571,6 +627,6 @@
 			window.dxpsFire({ name: 'generate_lead', params: p });
 		}, true);
 	}
-	document.addEventListener('dxps:consent',function(ev){if(ev.detail==='granted'){googlePageView();(window.dxpsEvents||[]).filter(function(e){return /^view_|^begin_checkout$/.test(e.name)}).forEach(window.dxpsFire);checkScroll();}else{activeMs=0;maxScrollPct=0;timeWatch.forEach(function(w){w.done=0});scrollWatch.forEach(function(w){w.done=0});if(typeof readState!=='undefined'&&readState){readState.s=0;readState.t=0;readState.done=0}}});
+	document.addEventListener('dxps:consent',function(ev){if(ev.detail==='granted'){googlePageView();(window.dxpsEvents||[]).filter(function(e){return /^view_|^begin_checkout$/.test(e.name)}).forEach(window.dxpsFire);checkScroll();}else{relayBuf=[];amSig='';activeMs=0;maxScrollPct=0;timeWatch.forEach(function(w){w.done=0});scrollWatch.forEach(function(w){w.done=0});if(typeof readState!=='undefined'&&readState){readState.s=0;readState.t=0;readState.done=0}}});
 	$(function(){if(window.dxpsPendingPageView){window.dxpsMetaPageView(window.dxpsPendingPageView);window.dxpsPendingPageView='';}(window.dxpsEvents||[]).forEach(window.dxpsFire);});
 })(jQuery);

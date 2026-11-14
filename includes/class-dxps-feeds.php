@@ -14,6 +14,20 @@ class DXPS_Feeds {
 		add_action('admin_enqueue_scripts',array('DXPS_Feeds_Admin','assets'));
 		add_action( 'admin_post_dxps_feed', array( 'DXPS_Feeds_Admin', 'action' ) );
 		if ( ! wp_next_scheduled( 'dxps_feed_tick' ) ) wp_schedule_event( time() + 300, 'hourly', 'dxps_feed_tick' );
+		// 2.2.0: a price, sale, stock or visibility change marks the catalogues stale, so a scheduled feed is rebuilt
+		// at the next hourly tick instead of advertising sold-out or wrongly priced products until its next full run.
+		add_action( 'woocommerce_product_object_updated_props', array( __CLASS__, 'product_changed' ), 10, 2 );
+		foreach ( array( 'woocommerce_product_set_stock_status', 'woocommerce_variation_set_stock_status', 'woocommerce_new_product', 'woocommerce_delete_product', 'woocommerce_trash_product' ) as $hook ) add_action( $hook, array( __CLASS__, 'touch' ), 10, 0 );
+	}
+	public static function product_changed( $product, $props ) {
+		if ( array_intersect( (array) $props, array( 'price','regular_price','sale_price','date_on_sale_from','date_on_sale_to','stock_status','stock_quantity','manage_stock','backorders','status','catalog_visibility','name','description','short_description','image_id','gallery_image_ids','category_ids','sku' ) ) ) self::touch();
+	}
+	/** One small write per request, however many products changed. */
+	public static function touch() {
+		static $done = false;
+		if ( $done || ! get_option( 'dxps_feeds' ) ) return;
+		$done = true;
+		update_option( 'dxps_feeds_dirty', time(), false );
 	}
 	public static function all() { $all=(array)get_option('dxps_feeds',array()); foreach($all as &$cfg)$cfg=array_merge(DXPS_Feed_Options::DEFAULTS,$cfg); return $all; }
 	public static function config( $id ) { $all = self::all(); return $all[$id] ?? null; }
@@ -71,6 +85,7 @@ class DXPS_Feeds {
 	}
 	public static function status( $id ) { return (array) get_option( 'dxps_feed_status_' . $id, array() ); }
 	public static function tick() {
+		$dirty = (int) get_option( 'dxps_feeds_dirty', 0 );
 		foreach ( self::all() as $id=>$cfg ) {
 			$s = self::status( $id );
 			if ( 'running' === ( $s['state'] ?? '' ) ) {
@@ -78,7 +93,10 @@ class DXPS_Feeds {
 				continue;
 			}
 			$interval = self::INTERVALS[$cfg['schedule']] ?? 0;
-			if ( $interval && ( $s['started'] ?? 0 ) + $interval <= time() ) self::start( $id );
+			$started = (int) ( $s['started'] ?? 0 );
+			if ( ! $interval ) continue; // manual feeds are never rebuilt automatically
+			if ( $started + $interval <= time() ) self::start( $id );
+			elseif ( $dirty > $started && $started + HOUR_IN_SECONDS <= time() && apply_filters( 'dxps_feed_rebuild_on_change', true, $id, $cfg ) ) self::start( $id );
 		}
 	}
 	public static function start( $id ) {
@@ -112,9 +130,16 @@ class DXPS_Feeds {
 		elseif ( 'json' === $cfg['format'] ) self::write( $fp, '[' );
 		elseif ( false === fputcsv( $fp, self::columns($cfg), 'tsv' === $cfg['format'] ? "\t" : ',', '"', '' ) ) throw new RuntimeException( 'disk_write_failed' );
 	}
-	public static function fields($cfg){return in_array($cfg['platform'],array('google','generic'),true)?DXPS_Feed_Product::FIELDS:array_values(array_diff(DXPS_Feed_Product::FIELDS,array('return_policy_label')));}
+	public static function fields($cfg){
+		$drop=array();
+		if(!in_array($cfg['platform'],array('google','generic'),true))$drop[]='return_policy_label';
+		if(!in_array($cfg['platform'],array('meta','generic'),true))$drop[]='quantity_to_sell_on_facebook';
+		return array_values(array_diff(DXPS_Feed_Product::FIELDS,$drop));
+	}
 	public static function columns($cfg){$columns=self::fields($cfg);foreach($columns as &$key)if('shipping'===$key&&in_array($cfg['platform'],array('google','generic','microsoft'),true))$key='shipping(country:region:service:price'.(in_array($cfg['platform'],array('google','generic'),true)?':min_handling_time:max_handling_time:min_transit_time:max_transit_time':'').')';return $columns;}
 	public static function write_row( $fp, $row, $cfg, $first = false ) {
+		// Meta has no "backorder" value: an item that can be ordered but is not in stock is "available for order".
+		if ( 'meta' === $cfg['platform'] && 'backorder' === $row['availability'] ) $row['availability'] = 'available for order';
 		if ( in_array( $cfg['platform'], array( 'meta','pinterest' ), true ) ) $row['availability'] = str_replace( '_', ' ', $row['availability'] );
 		if ( in_array( $row['identifier_exists'] ?? '', array( 'false','0' ), true ) ) $row['identifier_exists'] = 'no';
 		if ( in_array( $row['identifier_exists'] ?? '', array( 'true','1' ), true ) ) $row['identifier_exists'] = 'yes';

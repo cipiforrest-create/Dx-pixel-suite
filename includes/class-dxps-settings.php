@@ -9,8 +9,8 @@ class DXPS_Settings {
 	/** field => tab registry: text fields and checkbox fields per tab (prevents cross-tab wipes on save). */
 	private static $tabs = array(
 		'platforms' => array(
-			'text' => array( 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'ga4_id', 'ga4_api_secret', 'gads_conversion_id', 'gads_purchase_label', 'gads_lead_label', 'gtm_id' ),
-			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu' ),
+			'text' => array( 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'ga4_id', 'ga4_api_secret', 'gads_conversion_id', 'gads_purchase_label', 'gads_lead_label', 'gtm_id', 'gads_merchant_id', 'gads_feed_country', 'gads_feed_language' ),
+			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu', 'gads_remarketing', 'ga4_page_titles' ),
 		),
 		'events' => array(
 			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich' ),
@@ -150,12 +150,16 @@ class DXPS_Settings {
 		echo '<tr><th></th><td>'; self::c( 'ga4_enabled', 'Enable GA4 (browser tag + server Measurement Protocol)' ); echo '</td></tr>';
 		echo '<tr><th>Measurement ID</th><td>'; self::f( 'ga4_id', 'G-XXXXXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th>MP API secret</th><td>'; self::f( 'ga4_api_secret' ); echo '<p class="description">GA4 Admin → Data streams → stream → Measurement Protocol API secrets.</p></td></tr>';
+		echo '<tr><th>Page titles</th><td>'; self::c( 'ga4_page_titles', 'Send real page titles to GA4', 'Off: GA4 receives a generic title and you report by page path. On: the browser title is sent, as a standard GA4 setup does. Pages with health-related wording are never tracked either way. Campaign parameters (utm_*, gclid, gbraid, wbraid, msclkid) are always kept in the page address so GA4 can attribute sessions; every other URL parameter is removed.' ); echo '</td></tr>';
 		echo '</table><h2>Google Ads</h2><table class="form-table">';
 		echo '<tr><th></th><td>'; self::c( 'gads_enabled', 'Enable Google Ads conversion tracking' ); echo '</td></tr>';
 		echo '<tr><th>Conversion ID</th><td>'; self::f( 'gads_conversion_id', 'AW-XXXXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th>Purchase label</th><td>'; self::f( 'gads_purchase_label' ); echo '</td></tr>';
 		echo '<tr><th>Lead label</th><td>'; self::f( 'gads_lead_label' ); echo '<p class="description">Optional — WhatsApp/phone/email clicks as a secondary conversion.</p></td></tr>';
 		echo '<tr><th></th><td>'; self::c( 'gads_enhanced', 'Enhanced Conversions (hashed billing data with purchases)' ); echo '</td></tr>';
+		echo '<tr><th>Merchant Center ID</th><td>'; self::f( 'gads_merchant_id', '123456789' ); echo '<p class="description">Optional. Adds cart data to the purchase conversion (product IDs, quantities, prices), so Google Ads can report and optimise Shopping / Performance Max per product. Use the Merchant Center account that fetches your DX Google feed. The purchased product IDs are sent with the conversion even without it.</p></td></tr>';
+		echo '<tr><th>Feed country / language</th><td><input name="gads_feed_country" size="4" maxlength="2" placeholder="BA" value="' . esc_attr( DXPS_Helpers::opt( 'gads_feed_country' ) ) . '"> <input name="gads_feed_language" size="4" maxlength="2" placeholder="BS" value="' . esc_attr( DXPS_Helpers::opt( 'gads_feed_language' ) ) . '"><p class="description">Two-letter codes of the Merchant Center feed, e.g. BA and BS. Leave empty if unsure.</p></td></tr>';
+		echo '<tr><th>Dynamic remarketing</th><td>'; self::c( 'gads_remarketing', 'Send product views, cart and checkout events to Google Ads', 'Builds retail remarketing audiences and powers catalogue ads from the same product IDs as your feed. Off by default: personalised advertising is restricted for some product categories (for example health-related ones) - check Google Ads policy for your catalogue before enabling. Needs Google Ads enabled above; not used in GTM-only mode.' ); echo '</td></tr>';
 		echo '</table><h2>Google Tag Manager</h2><table class="form-table">';
 		echo '<tr><th></th><td>'; self::c( 'gtm_enabled', 'Enable GTM container' ); echo '</td></tr>';
 		echo '<tr><th>Container ID</th><td>'; self::f( 'gtm_id', 'GTM-XXXXXXX' ); echo '</td></tr>';

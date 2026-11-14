@@ -3,8 +3,63 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 /** WooCommerce -> catalogue row. No customer data or executable mapping expressions. */
 class DXPS_Feed_Product {
-	const FIELDS = array( 'id','title','description','link','image_link','additional_image_link','availability','availability_date','price','sale_price','sale_price_effective_date','condition','brand','gtin','mpn','identifier_exists','item_group_id','google_product_category','product_type','color','size','gender','age_group','material','pattern','size_type','size_system','shipping','return_policy_label','shipping_weight','shipping_label','tax_category','adult','multipack','is_bundle','custom_label_0','custom_label_1','custom_label_2','custom_label_3','custom_label_4' );
+	const FIELDS = array( 'id','title','description','link','image_link','additional_image_link','availability','availability_date','price','sale_price','sale_price_effective_date','condition','brand','gtin','mpn','identifier_exists','item_group_id','google_product_category','product_type','color','size','gender','age_group','material','pattern','size_type','size_system','shipping','return_policy_label','quantity_to_sell_on_facebook','shipping_weight','shipping_label','tax_category','adult','multipack','is_bundle','custom_label_0','custom_label_1','custom_label_2','custom_label_3','custom_label_4' );
 	const MAPPABLE = array( 'title','description','image_link','brand','gtin','mpn','identifier_exists','google_product_category','product_type','color','size','gender','age_group','material','pattern','size_type','size_system','availability_date','shipping_label','tax_category','adult','multipack','is_bundle','custom_label_0','custom_label_1','custom_label_2','custom_label_3','custom_label_4' );
+
+	/** Attribute slugs (with or without the pa_ prefix) read for each feed field, including common localised names. */
+	const ATTRIBUTE_ALIASES = array(
+		'color'    => array( 'color', 'colour', 'boja', 'boje', 'nijansa', 'farbe', 'couleur', 'kleur' ),
+		'size'     => array( 'size', 'velicina', 'veličina', 'duzina', 'dužina', 'length', 'groesse', 'grosse', 'taille', 'maat' ),
+		'material' => array( 'material', 'materijal', 'stoff', 'matiere' ),
+		'pattern'  => array( 'pattern', 'uzorak', 'muster', 'motif' ),
+	);
+
+	private static function attribute( $p, $field ) {
+		static $aliases = null;
+		if ( null === $aliases ) $aliases = (array) apply_filters( 'dxps_feed_attribute_aliases', self::ATTRIBUTE_ALIASES );
+		foreach ( (array) ( $aliases[ $field ] ?? array( $field ) ) as $slug ) {
+			// A variation returns its own selected value and falls back to the parent's attribute.
+			$v = $p->get_attribute( 'pa_' . $slug ) ?: $p->get_attribute( $slug );
+			if ( is_string( $v ) && '' !== $v ) return $v;
+		}
+		return '';
+	}
+
+	/** Full path of the product's most specific category: "Hair extensions > Clip-in", not an unordered term list. */
+	private static function category_path( $ids ) {
+		static $cache = array();
+		$best = array();
+		foreach ( $ids as $id ) {
+			if ( ! isset( $cache[ $id ] ) ) {
+				$chain = array_reverse( get_ancestors( $id, 'product_cat', 'taxonomy' ) ); $chain[] = $id; $names = array();
+				foreach ( $chain as $t ) { $term = get_term( $t, 'product_cat' ); if ( $term && ! is_wp_error( $term ) ) $names[] = $term->name; }
+				$cache[ $id ] = $names;
+			}
+			if ( count( $cache[ $id ] ) > count( $best ) ) $best = $cache[ $id ];
+		}
+		return implode( ' > ', $best );
+	}
+
+	/**
+	 * Segmentation labels for campaign structure and bidding (opt-in per feed): price tier, sale state, sales
+	 * history, novelty and stock. Built from store facts only; a label set on the product always wins.
+	 */
+	private static function auto_labels( $p, $base, $cfg, $price ) {
+		$tier = 'price-0+'; $prev = 0;
+		foreach ( $cfg['price_tiers'] as $limit ) { if ( $price < $limit ) { $tier = 'price-' . $prev . '-' . $limit; break; } $prev = $limit; $tier = 'price-' . $limit . '+'; }
+		$sales = (int) $base->get_total_sales();
+		list( $top, $steady ) = array_pad( array_map( 'absint', (array) apply_filters( 'dxps_feed_sales_tiers', array( 30, 5 ) ) ), 2, 0 );
+		$created = $base->get_date_created();
+		$stock = $p->is_on_backorder( 1 ) ? 'backorder' : ( ! $p->is_in_stock() ? 'out-of-stock' : 'in-stock' );
+		if ( 'in-stock' === $stock && $p->managing_stock() && null !== $p->get_stock_quantity() && $p->get_stock_quantity() <= max( 1, (int) wc_get_low_stock_amount( $p ) ) ) $stock = 'low-stock';
+		return array(
+			'custom_label_0' => $tier,
+			'custom_label_1' => $p->is_on_sale() ? 'on-sale' : 'full-price',
+			'custom_label_2' => $sales >= $top ? 'bestseller' : ( $sales >= $steady ? 'steady-seller' : ( $sales > 0 ? 'low-sales' : 'no-sales' ) ),
+			'custom_label_3' => ( $created && $created->getTimestamp() > time() - 45 * DAY_IN_SECONDS ) ? 'new-arrival' : 'catalogue',
+			'custom_label_4' => $stock,
+		);
+	}
 
 	public static function text( $value, $limit = 5000 ) {
 		if ( ! is_scalar( $value ) ) return '';
@@ -87,17 +142,21 @@ class DXPS_Feed_Product {
 		if ( 'output' === $row['identifier_exists'] ) $row['identifier_exists'] = 'no';
 		if ( ! $row['brand'] && taxonomy_exists( 'product_brand' ) ) $row['brand'] = self::mapped( 'taxonomy:product_brand', $p, $parent );
 		if ( $parent ) $row['item_group_id'] = DXPS_Helpers::pid( $parent );
-		$terms = wc_get_product_terms( $base->get_id(), 'product_cat', array( 'fields'=>'names' ) );
-		$row['product_type'] = is_wp_error( $terms ) ? '' : implode( ' > ', $terms );
+		$row['product_type'] = self::category_path( $base->get_category_ids() );
 		$images = array();
-		foreach ( array_slice( $base->get_gallery_image_ids(), 0, 10 ) as $image ) { $url = wp_get_attachment_url( $image ); if ( $url && $url !== $row['image_link'] && self::valid_url( $url ) ) $images[] = $url; }
+		// A variation shown with its own photo keeps the parent's main photo as an extra view.
+		$gallery = $base->get_gallery_image_ids();
+		if ( $parent && $p->get_image_id() && $base->get_image_id() && (int) $p->get_image_id() !== (int) $base->get_image_id() ) array_unshift( $gallery, $base->get_image_id() );
+		foreach ( array_slice( $gallery, 0, 10 ) as $image ) { $url = wp_get_attachment_url( $image ); if ( $url && $url !== $row['image_link'] && self::valid_url( $url ) ) $images[] = $url; }
 		$row['additional_image_link'] = array_values( array_unique( $images ) );
 		foreach ( array( 'color','size','gender','age_group','material','pattern','size_type','size_system' ) as $field ) {
 			$row[$field] = self::meta( $p, $parent, array( '_dxps_' . $field, 'wpfoof-' . $field ) );
-			if ( ! $row[$field] ) $row[$field] = $p->get_attribute( 'pa_' . $field ) ?: $p->get_attribute( $field );
+			if ( ! $row[$field] ) $row[$field] = self::attribute( $p, $field );
 		}
 		foreach ( array( 'shipping_label','tax_category','adult','multipack','is_bundle','custom_label_0','custom_label_1','custom_label_2','custom_label_3','custom_label_4' ) as $field ) $row[$field] = self::meta( $p, $parent, array( '_dxps_' . $field, 'wpfoof-' . $field ) );
 		if ( '' !== $p->get_weight() ) $row['shipping_weight'] = wc_get_weight( (float) $p->get_weight(), 'kg' ) . ' kg';
+		// Meta stops delivering ads for an item once this reaches zero - no spend on products that just sold out.
+		if ( $p->managing_stock() && null !== $p->get_stock_quantity() ) $row['quantity_to_sell_on_facebook'] = (string) max( 0, (int) $p->get_stock_quantity() );
 
 		$current = $p->get_price(); $regular = $p->get_regular_price();
 		if ( '' === $current || ! is_numeric( $current ) || (float) $current <= 0 ) $errors[] = 'missing_or_nonpositive_price';
@@ -112,8 +171,27 @@ class DXPS_Feed_Product {
 			$from = $p->get_date_on_sale_from(); $to = $p->get_date_on_sale_to();
 			if ( $from && $to ) $row['sale_price_effective_date'] = $from->date( DATE_ATOM ) . '/' . $to->date( DATE_ATOM );
 		}
+		if ( ! empty( $cfg['auto_labels'] ) ) foreach ( self::auto_labels( $p, $base, $cfg, (float) wc_get_price_to_display( $p ) ) as $field=>$label ) if ( '' === (string) ( $row[$field] ?? '' ) ) $row[$field] = $label;
 		$row=DXPS_Feed_Options::enrich($row,$p,$base,$cfg);
 		foreach ( $cfg['mapping'] as $field=>$source ) if ( in_array( $field, self::MAPPABLE, true ) ) { $value = self::mapped( $source, $p, $parent ); if ( '' !== $value ) $row[$field] = $value; }
+		// A product without any description was dropped from the catalogue before 2.2.0. The title is a truthful
+		// minimum; the report still asks for a real description.
+		if ( '' === self::text( $row['description'] ?? '' ) ) {
+			$row['description'] = self::text( $p->get_short_description() ?: $base->get_short_description() ) ?: $row['title'];
+			$warnings[] = 'description_missing_fallback_used';
+		}
+		// Backorders without a date: follow the feed's backorder policy instead of always excluding the offer.
+		if ( 'backorder' === $row['availability'] ) {
+			$date = (string) ( $row['availability_date'] ?? '' );
+			$dated = preg_match( '/^\d{4}-\d\d-\d\dT/', $date ) && strtotime( $date ) > time();
+			if ( ! $dated && 'estimate' === $cfg['backorder_mode'] ) $row['availability_date'] = gmdate( 'Y-m-d\TH:i\Z', time() + max( 1, (int) $cfg['backorder_days'] ) * DAY_IN_SECONDS );
+			elseif ( ! $dated && in_array( $cfg['backorder_mode'], array( 'in_stock', 'out_of_stock' ), true ) ) { $row['availability'] = $cfg['backorder_mode']; unset( $row['availability_date'] ); }
+		}
+		if ( $cfg['link_params'] ) {
+			parse_str( $cfg['link_params'], $extra );
+			foreach ( $extra as $k=>$v ) $extra[$k] = str_replace( '{id}', $row['id'], (string) $v );
+			$row['link'] = esc_url_raw( add_query_arg( array_map( 'rawurlencode', $extra ), $row['link'] ) );
+		}
 		if('none'===$cfg['identifier_mode']&&$cfg['identifier_confirmed']&&empty($row['gtin'])&&empty($row['mpn'])&&empty($row['identifier_exists']))$row['identifier_exists']='no';
 		foreach ( $row as $k=>$v ) if ( ! is_array( $v ) ) $row[$k] = self::text( $v, 'description' === $k ? 5000 : ( 'title' === $k ? 150 : 2000 ) );
 		$row = apply_filters( 'dxps_feed_product_row', $row, $p, $cfg );
@@ -139,7 +217,8 @@ class DXPS_Feed_Product {
 		if(('required'===($cfg['identifier_mode']??''))&&empty($row['gtin'])&&(empty($row['brand'])||empty($row['mpn'])))$errors[]='identifiers_required';
 		if ( empty( $row['brand'] ) ) $warnings[] = 'brand_missing';
 		if ( empty( $row['google_product_category'] ) ) $warnings[] = 'google_category_missing';
-		if ( in_array( $row['availability'] ?? '', array( 'preorder','backorder' ), true ) ) {
+		// Meta publishes these as "preorder" / "available for order" and does not ask for a date.
+		if ( 'meta' !== $cfg['platform'] && in_array( $row['availability'] ?? '', array( 'preorder','backorder' ), true ) ) {
 			$date = $row['availability_date'] ?? '';
 			if ( ! preg_match( '/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d)$/', $date ) || strtotime( $date ) <= time() ) $errors[] = 'future_availability_date_required';
 		}
