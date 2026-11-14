@@ -2,6 +2,8 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 class DXPS_Helpers {
+	private static $options = null;
+	public static function reset_options() { self::$options = null; }
 
 	const EXT_COOKIE = 'pbid'; // external_id cookie (PYS-compatible name)
 	const EXT_COOKIE_LEGACY = '_dxps_eid';
@@ -14,8 +16,8 @@ class DXPS_Helpers {
 	const FALLBACKS = array( 'track_scroll' => 1, 'track_time' => 1, 'track_clicks' => 1, 'time_on_page' => 30 );
 
 	public static function opt( $key, $default = '' ) {
-		static $o = null;
-		if ( null === $o ) $o = get_option( 'dxps_settings', array() );
+		if ( null === self::$options ) self::$options = (array) get_option( 'dxps_settings', array() );
+		$o = self::$options;
 		if ( is_array( $o ) && $o && ! array_key_exists( $key, $o ) && isset( self::FALLBACKS[ $key ] ) ) return self::FALLBACKS[ $key ];
 		return isset( $o[ $key ] ) && '' !== $o[ $key ] ? $o[ $key ] : $default;
 	}
@@ -43,8 +45,9 @@ class DXPS_Helpers {
 	 * already sends every event, so server copies would double-count - only purchase/refund can be opted in.
 	 */
 	public static function ga4_server_allowed( $event_name ) {
-		if ( ! self::engine_direct() ) return true;
-		return in_array( $event_name, array( 'purchase', 'refund' ), true ) && self::on( 'ga4_server_purchase' );
+		// GA4 does not deduplicate arbitrary browser/MP events by event_id. One owner only.
+		if ( 'purchase' === $event_name ) return 'status' === self::opt( 'purchase_trigger', 'status' ) || self::on( 'ga4_server_purchase' );
+		return in_array( $event_name, array( 'refund','login','sign_up','comment' ), true );
 	}
 
 	/* ---------------- Geo / consent ---------------- */
@@ -71,14 +74,14 @@ class DXPS_Helpers {
 		// Explicit withdrawal always wins, including when regional defaults are disabled.
 		if ( isset( $_COOKIE['_dxps_consent'] ) && 'denied' === $_COOKIE['_dxps_consent'] ) return false;
 		if ( ! self::on( 'consent_mode' ) ) return true;
-		if ( ! self::is_eea() ) return true;
 		return isset( $_COOKIE['_dxps_consent'] ) && 'granted' === $_COOKIE['_dxps_consent'];
 	}
 
 	/* ---------------- Normalisation + hashing (Meta / Google spec) ---------------- */
 
 	public static function hash( $v ) {
-		$v = trim( strtolower( (string) $v ) );
+		$v = trim( (string) $v );
+		$v = function_exists( 'mb_strtolower' ) ? mb_strtolower( $v, 'UTF-8' ) : strtolower( $v );
 		return '' === $v ? '' : hash( 'sha256', $v );
 	}
 
@@ -86,14 +89,14 @@ class DXPS_Helpers {
 		$raw = trim( (string) $phone );
 		if ( ! $raw || preg_match( '/[a-z]/i', $raw ) ) return '';
 		$p = preg_replace( '/\D/', '', $raw );
-		$prefix = array( 'BA'=>'387','RS'=>'381','HR'=>'385','SI'=>'386','DE'=>'49','AT'=>'43','CH'=>'41','ME'=>'382','MK'=>'389','GB'=>'44','US'=>'1','CA'=>'1','FR'=>'33','IT'=>'39','NL'=>'31','SE'=>'46' );
+		$prefix = array( 'BA'=>'387','RS'=>'381','HR'=>'385','SI'=>'386','DE'=>'49','AT'=>'43','CH'=>'41','ME'=>'382','MK'=>'389','GB'=>'44','US'=>'1','CA'=>'1','FR'=>'33','IT'=>'39','NL'=>'31','SE'=>'46','PL'=>'48','ES'=>'34','PT'=>'351','BE'=>'32','CZ'=>'420','SK'=>'421','HU'=>'36','RO'=>'40','BG'=>'359','GR'=>'30','IE'=>'353','DK'=>'45','NO'=>'47','FI'=>'358','AU'=>'61','NZ'=>'64','TR'=>'90' );
 		$cc = $prefix[ strtoupper( $country ) ] ?? '';
 		// 1.7.0 (opt-in): a local-format number with no country on the form is assumed to be in the store's country.
 		if ( ! $cc && self::on( 'phone_default_country' ) ) $cc = $prefix[ self::default_country() ] ?? '';
 		if ( strpos( $raw, '00' ) === 0 ) $p = substr( $p, 2 );
 		elseif ( strpos( $raw, '+' ) !== 0 ) {
 			if ( ! $cc ) return '';
-			if ( strpos( $p, $cc ) !== 0 ) $p = $cc . ltrim( $p, '0' );
+			if ( strpos( $p, $cc ) !== 0 ) $p = $cc . ( 'IT' === strtoupper( $country ) ? $p : ltrim( $p, '0' ) );
 		}
 		return preg_match( '/^[1-9][0-9]{7,14}$/', $p ) ? '+' . $p : '';
 	}
@@ -139,7 +142,7 @@ class DXPS_Helpers {
 		if ( ! is_array( $p ) || empty( $p['host'] ) || strtolower( $p['host'] ) !== strtolower( $site['host'] ) ) return home_url( '/' );
 		$path = $p['path'] ?? '/';
 		$path = preg_replace( '~/(order-received|order-pay)/[0-9]+/?$~', '/', $path );
-		return ( $site['scheme'] ?? 'https' ) . '://' . $site['host'] . $path;
+		return ( $site['scheme'] ?? 'https' ) . '://' . $site['host'] . ( isset( $site['port'] ) ? ':' . $site['port'] : '' ) . $path;
 	}
 
 	/** Keep only validated matching fields, never custom/free-text user data. */
@@ -292,7 +295,7 @@ class DXPS_Helpers {
 
 	public static function external_id() {
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return strtolower( $_COOKIE[ $c ] );
+			if ( ! empty( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return hash( 'sha256', strtolower( $_COOKIE[ $c ] ) );
 		}
 		return is_user_logged_in() ? hash( 'sha256', 'dxps.user.' . get_current_user_id() ) : '';
 	}
@@ -301,7 +304,7 @@ class DXPS_Helpers {
 	public static function external_ids() {
 		$ids = array();
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = strtolower( $_COOKIE[ $c ] ); break; }
+			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = hash( 'sha256', strtolower( $_COOKIE[ $c ] ) ); break; }
 		}
 		if ( is_user_logged_in() ) $ids[] = hash( 'sha256', 'dxps.user.' . get_current_user_id() );
 		return array_values( array_unique( $ids ) );
@@ -381,6 +384,7 @@ class DXPS_Helpers {
 		$cats = wc_get_product_terms( $product->get_id(), 'product_cat', array( 'fields' => 'names' ) );
 		return array(
 			'id'       => self::pid( $product ),
+			'content_type' => $product->is_type( 'variable' ) ? 'product_group' : 'product',
 			'brand'    => self::on( 'track_brand' ) ? self::opt( 'brand_name', 'Eynna Hair' ) : '',
 			'name'     => $product->get_name(),
 			'price'    => (float) wc_get_price_to_display( $product ),
@@ -449,11 +453,11 @@ class DXPS_Helpers {
 	/* ---------------- Per-pageload event queue (session) ---------------- */
 
 	public static function queue_event( $name, $params ) {
-		if ( self::excluded_role() ) return;
+		if ( self::excluded_role() || ! self::marketing_allowed() ) return;
 		if ( function_exists( 'WC' ) && WC()->session ) {
 			$q   = WC()->session->get( 'dxps_queue', array() );
 			$q[] = array( 'name' => $name, 'params' => $params, 'event_id' => self::event_id( $name ) );
-			WC()->session->set( 'dxps_queue', $q );
+			WC()->session->set( 'dxps_queue', array_slice( $q, -30 ) );
 		}
 	}
 
@@ -477,6 +481,7 @@ class DXPS_Helpers {
 	 * only where the customer has not given that field. Approximate, and derived from the IP Meta already receives.
 	 */
 	public static function geo_hashes() {
+		if ( ! apply_filters( 'dxps_trust_proxy_headers', false ) ) return array();
 		$mode = (string) self::opt( 'geo_enrich' );
 		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
 		$raw = array();
@@ -645,4 +650,36 @@ class DXPS_Helpers {
 			error_log( $line );
 		}
 	}
+	public static function client_ip() {
+		// Trust only the web server's resolved address. A proxy integration can explicitly override it.
+		$ip = apply_filters( 'dxps_client_ip', $_SERVER['REMOTE_ADDR'] ?? '' );
+		return is_string( $ip ) && filter_var( $ip, FILTER_VALIDATE_IP ) ? $ip : '';
+	}
+	public static function google_email( $email ) {
+		$email = strtolower( trim( (string) $email ) );
+		if ( ! is_email( $email ) ) return '';
+		list( $local, $domain ) = explode( '@', $email, 2 );
+		if ( in_array( $domain, array( 'gmail.com','googlemail.com' ), true ) ) $local = str_replace( '.', '', $local );
+		return $local . '@' . $domain;
+	}
+	public static function google_user_from_order( $order ) {
+		$email = self::google_email( $order->get_billing_email() );
+		$phone = self::norm_phone( $order->get_billing_phone(), $order->get_billing_country() );
+		$address = array_filter( array(
+			'sha256_first_name'=>self::hash( $order->get_billing_first_name() ),
+			'sha256_last_name'=>self::hash( $order->get_billing_last_name() ),
+			'sha256_street'=>self::hash( trim( $order->get_billing_address_1() . ' ' . $order->get_billing_address_2() ) ),
+			'city'=>$order->get_billing_city(), 'region'=>$order->get_billing_state(),
+			'postal_code'=>$order->get_billing_postcode(), 'country'=>strtoupper( $order->get_billing_country() ),
+		) );
+		return array_filter( array( 'sha256_email_address'=>$email ? hash( 'sha256', $email ) : '', 'sha256_phone_number'=>$phone ? hash( 'sha256', $phone ) : '', 'address'=>$address ) );
+	}
+	public static function ga_session_id() {
+		$id = preg_replace( '/^G-/', '', (string) self::opt( 'ga4_id' ) );
+		$c = $_COOKIE['_ga_' . $id] ?? '';
+		if ( ! is_string( $c ) ) return '';
+		if ( preg_match( '/^GS1\.\d\.(\d+)/', $c, $m ) || preg_match( '/^GS2\.\d\.s(\d+)/', $c, $m ) ) return $m[1];
+		return '';
+	}
+
 }

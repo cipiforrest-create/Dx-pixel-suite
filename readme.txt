@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.8.1
-Stable tag: 1.8.1
+Version: 2.1.0
+Stable tag: 2.1.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,23 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 2.1.0 =
+* Expanded feed editor: automatic local policy/shipping discovery, shipping rows, Google return labels, visual mappings, category suggestions and product previews.
+* Added content/price filters and actionable diagnostics; fixed description word boundaries.
+* Added protected in-page build progress and preserved existing feed URLs.
+* See UPGRADE-2.1.md for setup and platform-validation limits.
+
+= 2.0.0 =
+* Product Feeds tab: Google, Meta, Pinterest, Microsoft and Generic profiles; XML, CSV, TSV and generic JSON.
+* Background batches, atomic publication, resumable checkpoints, product-level validation and reports.
+* Product and variation catalogue fields; shared tracking/feed IDs, sale prices, identifiers and attribute mappings.
+* Consistent consent defaults and withdrawal, Google/Meta normalization, trusted-IP handling.
+* Single Google event owner; consented page_view with redacted URLs; validated public relay.
+* Authorized thank-you order payloads, queued purchases, bounded retries and per-platform delivery markers.
+* Direct Google engine simplified; old inferred segments and DOM price scraping removed.
+* See UPGRADE-2.0.md for migration and limitations.
+
 
 = 1.8.1 =
 * Facebook Login ID is now also read from Nextend Social Login (its own database table), WooCommerce Social Login

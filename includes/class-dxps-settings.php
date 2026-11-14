@@ -114,14 +114,16 @@ class DXPS_Settings {
 	}
 
 	public static function page() {
+		if ( ! current_user_can( 'manage_options' ) ) return;
 		$tab = sanitize_key( $_GET['tab'] ?? 'platforms' );
 		echo '<div class="wrap"><h1>DX Pixel Suite <small style="font-weight:normal">v' . esc_html( DXPS_VERSION ) . '</small></h1><nav class="nav-tab-wrapper">';
-		foreach ( array( 'platforms' => 'Platforms', 'events' => 'Events & Parameters', 'consent' => 'Consent & Privacy', 'diagnostics' => 'Diagnostics', 'recommended' => '✓ Recommended setup' ) as $k => $l ) {
+		foreach ( array( 'platforms' => 'Platforms', 'events' => 'Events & Parameters', 'consent' => 'Consent & Privacy', 'feeds' => 'Product Feeds', 'diagnostics' => 'Diagnostics', 'recommended' => '✓ Recommended setup' ) as $k => $l ) {
 			echo '<a class="nav-tab ' . ( $tab === $k ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $k ) ) . '">' . esc_html( $l ) . '</a>';
 		}
 		echo '</nav>';
 		self::conflict_notice();
 		if ( ! empty( $_GET['dxps_saved'] ) ) echo '<div class="notice notice-success is-dismissible"><p>DX Pixel Suite settings saved.</p></div>';
+		if ( 'feeds' === $tab ) { DXPS_Feeds_Admin::page(); echo '</div>'; return; }
 		if ( 'recommended' === $tab ) { self::tab_recommended(); echo '</div>'; return; }
 		if ( 'diagnostics' === $tab ) { self::tab_diagnostics(); echo '</div>'; return; }
 
@@ -159,8 +161,8 @@ class DXPS_Settings {
 		echo '<tr><th>Container ID</th><td>'; self::f( 'gtm_id', 'GTM-XXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th></th><td>'; self::c( 'gtm_only', 'GTM-only mode', 'Push dataLayer events only; do not load direct GA4/Ads tags (avoids double-tracking if your container fires them).' ); echo '</td></tr>';
 		echo '</table><h2>Direct Google mode (replaces GTM)</h2><table class="form-table">';
-		echo '<tr><th></th><td>'; self::c( 'engine_direct', 'Run the enriched event engine inside DX (no GTM needed)', 'Sends the same GA4 events and parameters as the GTM container (view_item, add_to_cart, page_scroll, contact_click, purchase …) plus the eh_ads_* Google Ads events straight from DX. Works only while "Enable GTM container" above is OFF; needs GA4 (and optionally Google Ads) enabled with IDs filled in.' ); echo '</td></tr>';
-		echo '<tr><th></th><td>'; self::c( 'ga4_server_purchase', 'Also send purchase / refund through GA4 Measurement Protocol', 'Optional server-side backup in Direct Google mode (GA4 de-duplicates by transaction ID). Other events are never mirrored to GA4 server-side in this mode, to avoid double counting.' ); echo '</td></tr>';
+		echo '<tr><th></th><td>'; self::c( 'engine_direct', 'Use the direct Google dispatcher', 'One sender for DX events, using WooCommerce product IDs and prices. Works while GTM is off. No DOM price scraping or inferred customer segments.' ); echo '</td></tr>';
+		echo '<tr><th></th><td>'; self::c( 'ga4_server_purchase', 'Use GA4 server delivery for thank-you purchases', 'When enabled, DX suppresses its browser GA4 purchase. Status-triggered purchases and refunds always use the server. Requires a Measurement Protocol secret. Disable any duplicate purchase tags in GTM.' ); echo '</td></tr>';
 		if ( DXPS_Helpers::on( 'engine_direct' ) ) {
 			echo '<tr><th>Status</th><td><strong>' . ( DXPS_Helpers::engine_direct() ? 'Active' : 'Not active' ) . '</strong>' . ( DXPS_Helpers::engine_direct() ? '' : ' - turn GTM off and enable GA4 and/or Google Ads with their IDs.' ) . '</td></tr>';
 		}
@@ -183,7 +185,7 @@ class DXPS_Settings {
 		}
 		echo '</select><p class="description">The value sent with Purchase to every platform. Choose the net option to optimise ads on what you actually receive.</p></td></tr>';
 		echo '</table><h2>Events</h2><table class="form-table">';
-		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror browser events through Meta CAPI + GA4 MP', 'First-party, deduplicated by event_id — recovers ad-blocker/iOS losses. Relayed events carry the validated, hashed customer data that is actually available (email, phone, name, city, state, ZIP, country, external ID, Facebook Login ID). Date of birth and gender are never inferred or sent.' ); echo '</td></tr>';
+		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror consented browser events through Meta CAPI', 'Meta browser/server copies share an event ID. GA4 browser events are not mirrored; server purchases, refunds and account events have one delivery owner.' ); echo '</td></tr>';
 		echo '<tr><th>Leads</th><td>'; self::c( 'track_leads', 'WhatsApp / phone / email clicks → Lead' ); echo '</td></tr>';
 		echo '<tr><th>Search</th><td>'; self::c( 'track_search', 'Site search → Search' ); echo '</td></tr>';
 		echo '<tr><th>PageScroll</th><td>'; self::c( 'track_scroll', 'Scroll depth at 25 / 50 / 75 / 90% → PageScroll (Meta) + scroll (GA4)', 'Great for engaged-visitor custom audiences.' ); echo '</td></tr>';
@@ -262,10 +264,10 @@ class DXPS_Settings {
 	private static function tab_consent() {
 		echo '<h2>Consent Mode v2</h2><table class="form-table"><tr><th></th><td>';
 		self::c( 'consent_mode', 'Enable Consent Mode v2',
-			'<strong>ON:</strong> Google tags default to <em>denied</em> for EEA/UK/CH visitors (required for your HR/SI/DE traffic) and <em>granted</em> elsewhere — BA/RS visitors are unaffected. Meta Pixel is held for EEA visitors until your banner calls <code>dxpsConsent(\'granted\')</code>. Server relay respects the same consent state.<br><strong>OFF:</strong> everything fires immediately for everyone.' );
+			'<strong>ON:</strong> Google consent defaults to denied globally; DX marketing events and customer matching require your banner to call <code>dxpsConsent(\'granted\')</code>. Unknown location and cached pages follow the same rule. <code>dxpsConsent(\'denied\')</code> withdraws consent and clears DX identity/matching storage.<br><strong>OFF:</strong> events may run without an explicit grant, but an explicit denial is still respected. Connect your consent banner before enabling tracking.' );
 		echo '</td></tr></table>';
 		echo '<h2>Privacy hard rules (always active)</h2><ul style="list-style:disc;margin-left:20px">
-			<li>All customer data is SHA-256 hashed before transmission (Meta/Google spec).</li>
+			<li>Matching identity fields use platform-specific SHA-256 normalization. Browser IDs, IP/UA and allowed Google address components follow the respective platform specifications.</li>
 			<li>Coupons matching the excluded keywords never reach any platform.</li>
 			<li>DX suppresses recognized sensitive-health contexts and excludes free-text fields; review custom integrations and destinations separately.</li></ul>';
 	}
@@ -340,7 +342,7 @@ class DXPS_Settings {
 			array( 'GA4 API secret filled', '_ga4_secret', null, 'Required for Measurement Protocol.' ),
 			array( 'Google Ads + Enhanced Conversions', 'gads_enabled', 1, 'Enable direct Ads only with valid IDs/labels and a single conversion owner; match-quality gains vary.' ),
 			array( 'GTM', 'gtm_enabled', 0, 'Keep ON if GTM owns Google tracking; GTM-only suppresses DX direct Google dispatch, not DX Meta.' ),
-			array( 'Consent Mode v2', 'consent_mode', 1, 'ON — mandatory for your EU traffic (HR/SI/DE); BA/RS unaffected.' ),
+			array( 'Consent Mode v2', 'consent_mode', 1, 'ON — require consent globally, including when location is unknown.' ),
 			array( 'Purchase trigger = order status', '_purchase_status', null, 'COD store: fire on Completed, not thank-you — kills conversions from failed pouzeće orders.' ),
 			array( 'Server relay', 'server_relay', 1, 'Uses validated, consent-allowed matching fields and minimized Meta parameters; actual coverage depends on available customer data.' ),
 			array( 'Lead clicks (WhatsApp/tel/mail)', 'track_leads', 1, 'ON — WhatsApp is your biggest untracked conversion path.' ),
