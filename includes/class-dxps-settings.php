@@ -31,7 +31,50 @@ class DXPS_Settings {
 		add_menu_page( 'DX Pixel Suite', 'DX Pixel Suite', 'manage_options', 'dx-pixel-suite', array( __CLASS__, 'page' ), 'dashicons-chart-line', 58 );
 	}
 
+	/**
+	 * 1.9.0: settings that decide how much customer data reaches Meta (Event Match Quality). Value = recommended.
+	 * Saved settings are never changed silently; the "Apply recommended matching settings" button sets these.
+	 */
+	public static function matching_recommendations() {
+		$rec = array(
+			'auto_am'               => 1,
+			'server_relay'          => 1,
+			'am_all_forms'          => 1,
+			'am_retention_days'     => 90,
+			'phone_default_country' => 1,
+			'fbp_fallback'          => 1,
+			'track_form_leads'      => 1,
+		);
+		// Country fill-in needs Cloudflare's visitor-country header, which this request shows is present.
+		if ( ! empty( $_SERVER['HTTP_CF_IPCOUNTRY'] ) ) $rec['geo_enrich'] = 'country';
+		return $rec;
+	}
+
+	/** Recommended matching settings that are currently below the recommendation. */
+	public static function matching_gaps() {
+		$gaps = array();
+		foreach ( self::matching_recommendations() as $k => $want ) {
+			if ( 'am_retention_days' === $k ) { if ( (int) DXPS_Helpers::opt( $k, 0 ) < 30 ) $gaps[] = $k; continue; }
+			if ( 'geo_enrich' === $k )        { if ( '' === (string) DXPS_Helpers::opt( $k ) ) $gaps[] = $k; continue; }
+			if ( ! DXPS_Helpers::on( $k ) ) $gaps[] = $k;
+		}
+		return $gaps;
+	}
+
 	public static function save() {
+		if ( isset( $_POST['dxps_apply_matching'] ) && current_user_can( 'manage_options' ) ) {
+			check_admin_referer( 'dxps_settings' );
+			$o = get_option( 'dxps_settings', array() );
+			if ( ! is_array( $o ) ) $o = array();
+			foreach ( self::matching_recommendations() as $k => $want ) {
+				if ( 'am_retention_days' === $k ) { $o[ $k ] = max( (int) ( $o[ $k ] ?? 0 ), $want ); continue; }
+				if ( 'geo_enrich' === $k )        { if ( empty( $o[ $k ] ) ) $o[ $k ] = $want; continue; }
+				$o[ $k ] = $want;
+			}
+			update_option( 'dxps_settings', $o );
+			wp_safe_redirect( admin_url( 'admin.php?page=dx-pixel-suite&tab=recommended&dxps_matching=1' ) );
+			exit;
+		}
 		if ( isset( $_POST['dxps_clear_log'] ) && current_user_can( 'manage_options' ) ) {
 			check_admin_referer( 'dxps_settings' );
 			delete_option( 'dxps_event_log' );
@@ -82,6 +125,18 @@ class DXPS_Settings {
 		exit;
 	}
 
+	/** 1.9.0: one-click fix when the settings that carry customer data to Meta are below the recommendation. */
+	private static function matching_notice() {
+		$gaps = self::matching_gaps();
+		if ( ! $gaps ) return;
+		$labels = array( 'auto_am' => 'Automatic detection', 'server_relay' => 'Server relay', 'am_all_forms' => 'All forms', 'am_retention_days' => 'Remember matching data (90 days)', 'phone_default_country' => 'Phone default country', 'fbp_fallback' => 'Browser ID fallback', 'track_form_leads' => 'Form leads', 'geo_enrich' => 'Location fill-in (country)' );
+		echo '<div class="notice notice-warning"><p><strong>Low Event Match Quality risk.</strong> These settings decide how much customer data reaches Meta and are below the recommendation: '
+			. esc_html( implode( ', ', array_map( function ( $k ) use ( $labels ) { return $labels[ $k ] ?? $k; }, $gaps ) ) )
+			. '. Make sure your privacy policy covers them (hashed customer data, kept up to 90 days).</p><form method="post" style="margin:0 0 10px">';
+		wp_nonce_field( 'dxps_settings' );
+		echo '<button type="submit" name="dxps_apply_matching" value="1" class="button button-primary">Apply recommended matching settings</button></form></div>';
+	}
+
 	/** Another plugin sending to the same Meta pixel counts every shared event twice. */
 	private static function conflict_notice() {
 		$active = false;
@@ -122,6 +177,8 @@ class DXPS_Settings {
 		echo '</nav>';
 		self::conflict_notice();
 		if ( ! empty( $_GET['dxps_saved'] ) ) echo '<div class="notice notice-success is-dismissible"><p>DX Pixel Suite settings saved.</p></div>';
+		if ( ! empty( $_GET['dxps_matching'] ) ) echo '<div class="notice notice-success is-dismissible"><p>Recommended matching settings applied. Clear the page cache so visitors get the new settings.</p></div>';
+		self::matching_notice();
 		if ( 'recommended' === $tab ) { self::tab_recommended(); echo '</div>'; return; }
 		if ( 'diagnostics' === $tab ) { self::tab_diagnostics(); echo '</div>'; return; }
 
@@ -199,11 +256,11 @@ class DXPS_Settings {
 		echo '<tr><th>ACR</th><td>'; self::c( 'acr_enabled', 'Automatic Conversion Recovery — nightly sweep re-sends purchases the pixel/status hook missed (last 7 days, deduped by order)' ); echo '</td></tr>';
 		echo '</table><h2>Customer data (Advanced Matching)</h2><table class="form-table">';
 		echo '<tr><th>Automatic detection</th><td>';
-		self::c( 'auto_am', 'Scan page forms for customer data and send it with every event', 'Detects valid email, phone, first/last name, city, postcode, state and country in checkout/account forms or forms explicitly opted in with data-dxps-match — including browser autofill and multi-step checkout. Values feed Meta Advanced Matching in the browser (the pixel hashes them locally) and, via the server relay, hashed customer data for the Conversions API. This is the single biggest lever on Event Match Quality: it raises the "percent of events sending" figures Meta shows for phone, first name, last name and city.' );
-		echo '<p class="description" style="margin-top:6px"><strong>Never captured:</strong> passwords, payment card numbers, CVV/CVC, IBAN. Add <code>data-dxps-ignore</code> to any other field you want excluded. Matching fields are validated, normalized and SHA-256 hashed before the first-party form-ingest request. Only matching hashes are retained briefly. Browser Advanced Matching uses Meta’s own hashing. No customer information is embedded in cacheable page HTML. Requires the server relay for the CAPI half. Make sure your privacy policy and cookie banner cover this before enabling it in the EEA.</p>';
+		self::c( 'auto_am', 'Scan page forms for customer data and send it with every event', 'Detects valid email, phone, first/last name, city, postcode, state and country in checkout/account forms or forms explicitly opted in with data-dxps-match — including browser autofill and multi-step checkout. Since 1.9.0 the contact, booking and newsletter forms of common form plugins (Contact Form 7, WPForms, Elementor, Gravity, Fluent, Forminator, Ninja, Mailchimp for WP …) are included too, and full-name fields are split into first and last name. Values are SHA-256 hashed in the browser and reach the Conversions API right away; the browser pixel receives them in its first initialisation on the visitor&#8217;s next pages (Meta ignores user data added after that). This is the single biggest lever on Event Match Quality: it raises the "percent of events sending" figures Meta shows for phone, first name, last name and city.' );
+		echo '<p class="description" style="margin-top:6px"><strong>Never captured:</strong> passwords, payment card numbers, CVV/CVC, IBAN. Add <code>data-dxps-ignore</code> to any other field you want excluded. Matching fields are validated, normalized and SHA-256 hashed before the first-party form-ingest request. Only matching hashes are retained (on the server and in the visitor&#8217;s browser, for the period below). No customer information is embedded in cacheable page HTML. Requires the server relay for the CAPI half. Make sure your privacy policy and cookie banner cover this before enabling it in the EEA.</p>';
 		echo '</td></tr>';
 		echo '<tr><th>All forms</th><td>'; self::c( 'am_all_forms', 'Detect customer data in every form, not only checkout and account forms', 'Covers contact, newsletter and booking forms without adding <code>data-dxps-match</code>. Search boxes, passwords, payment fields and anything marked <code>data-dxps-ignore</code> stay excluded.' ); echo '</td></tr>';
-		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long the hashed matching data is kept for a returning browser, so later events (page views, add to cart) still carry it. <strong>0 = 10 minutes</strong> (default). 90 is typical. Only SHA-256 hashes are stored, they are deleted when consent is withdrawn, and your privacy policy should state the period.</p></td></tr>';
+		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long the hashed matching data is kept for a returning browser, so later events (page views, add to cart) still carry it — in the browser pixel and in the Conversions API. <strong>0 = 10 minutes</strong> (default). 90 is recommended. Only SHA-256 hashes are stored, they are deleted when consent is withdrawn, and your privacy policy should state the period.</p></td></tr>';
 		echo '<tr><th>URL parameters</th><td><textarea name="url_identity" class="large-text" rows="3" placeholder="email | em' . "\n" . 'phone | ph' . "\n" . 'name | name">' . esc_textarea( DXPS_Helpers::opt( 'url_identity' ) ) . '</textarea><p class="description">One per line: <code>url_parameter | field</code>. For email, SMS or booking links that arrive with customer details in the URL (for example <code>?email=…&amp;phone=…</code>). Fields: <code>em</code> <code>ph</code> <code>fn</code> <code>ln</code> <code>name</code> (full name) <code>ct</code> <code>st</code> <code>zp</code> <code>country</code>. Values are hashed in the browser and never sent as part of a page URL.</p></td></tr>';
 		echo '<tr><th>Phone numbers</th><td>'; self::c( 'phone_default_country', 'Assume the store country for phone numbers written without a country code', 'Meta only matches phone numbers that include a country code. Without this, local-format numbers from forms that have no country field are dropped.' ); echo '</td></tr>';
 		echo '<tr><th>Browser ID fallback</th><td>'; self::c( 'fbp_fallback', 'Create the _fbp browser ID cookie when Meta&#8217;s script is blocked', 'Ad blockers stop Meta&#8217;s script, so it never sets <code>_fbp</code> and server events lose that signal. DX then creates the cookie in Meta&#8217;s own format, after consent.' ); echo '</td></tr>';

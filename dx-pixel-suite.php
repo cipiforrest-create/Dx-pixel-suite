@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: First-party marketing tracking for WooCommerce. Meta Pixel + Conversions API, GA4 (gtag + Measurement Protocol), Google Ads + Enhanced Conversions, GTM dataLayer mode, Consent Mode v2 (toggle), status-based Purchase for COD, WhatsApp/phone/email lead events. Built for eynna-hair.ba by Digital X.
- * Version:     1.8.1
+ * Version:     1.9.0
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '1.8.1' );
+define( 'DXPS_VERSION', '1.9.0' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );

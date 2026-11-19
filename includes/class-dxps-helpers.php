@@ -98,13 +98,26 @@ class DXPS_Helpers {
 		return preg_match( '/^[1-9][0-9]{7,14}$/', $p ) ? '+' . $p : '';
 	}
 
-	/** Store base country (ISO-2, upper case) - used only by the opt-in phone fallback. */
+	/**
+	 * Store base country (ISO-2, upper case) - used only by the opt-in phone fallback.
+	 * 1.9.0: sites without WooCommerce fall back to the region of the site language (bs_BA -> BA, hr -> HR).
+	 */
 	public static function default_country() {
 		if ( function_exists( 'wc_get_base_location' ) ) {
 			$loc = wc_get_base_location();
 			if ( ! empty( $loc['country'] ) ) return strtoupper( $loc['country'] );
 		}
-		return '';
+		$locale = function_exists( 'get_locale' ) ? (string) get_locale() : '';
+		if ( preg_match( '/^[a-z]{2,3}_([A-Z]{2})/', $locale, $m ) ) return $m[1];
+		$lang = array( 'bs' => 'BA', 'hr' => 'HR', 'sr' => 'RS', 'sl' => 'SI', 'de' => 'DE', 'mk' => 'MK', 'cnr' => 'ME' );
+		return $lang[ strtolower( substr( $locale, 0, 3 ) ) ] ?? $lang[ strtolower( substr( $locale, 0, 2 ) ) ] ?? '';
+	}
+
+	/** Same site, ignoring a leading www. (www.example.com and example.com are one site). */
+	public static function same_site_host( $host ) {
+		$bare = function ( $h ) { return preg_replace( '/^www\./', '', strtolower( (string) $h ) ); };
+		$site = wp_parse_url( home_url(), PHP_URL_HOST );
+		return '' !== (string) $host && $bare( $host ) === $bare( $site );
 	}
 
 	public static function matching_value( $key, $value, $country = '' ) {
@@ -290,6 +303,7 @@ class DXPS_Helpers {
 
 	/* ---------------- First-party identifiers ---------------- */
 
+	/** Raw first-party browser ID (pbid cookie). Used as the storage key; send eid_out() of it to Meta. */
 	public static function external_id() {
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
 			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return strtolower( $_COOKIE[ $c ] );
@@ -297,14 +311,35 @@ class DXPS_Helpers {
 		return is_user_logged_in() ? hash( 'sha256', 'dxps.user.' . get_current_user_id() ) : '';
 	}
 
+	/**
+	 * 1.9.0: the external_id value sent to Meta. The browser pixel (fbq init) and the Conversions API must send
+	 * the SAME string, or Meta cannot join the two channels on it. Both sides send SHA-256 of the lower-case
+	 * browser ID; a value that already is a 64-character hash is sent unchanged (dxps-front / head use the same rule).
+	 */
+	public static function eid_out( $raw ) {
+		$raw = strtolower( trim( (string) $raw ) );
+		if ( preg_match( '/^[a-f0-9]{64}$/', $raw ) ) return $raw;
+		return preg_match( '/^[a-f0-9]{32,63}$/', $raw ) ? hash( 'sha256', $raw ) : '';
+	}
+
 	/** Every external ID known for this visitor: browser ID cookie plus, when logged in, the account ID. */
 	public static function external_ids() {
 		$ids = array();
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = strtolower( $_COOKIE[ $c ] ); break; }
+			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = self::eid_out( $_COOKIE[ $c ] ); break; }
 		}
 		if ( is_user_logged_in() ) $ids[] = hash( 'sha256', 'dxps.user.' . get_current_user_id() );
-		return array_values( array_unique( $ids ) );
+		return array_values( array_unique( array_filter( $ids ) ) );
+	}
+
+	/**
+	 * 1.9.0: matching hashes the browser kept from an earlier form fill (localStorage, same retention as the
+	 * server copy) and sends with relayed events. Only 64-character SHA-256 values for the matching keys are
+	 * accepted, so nothing readable can arrive this way. Used below live and remembered data, never above it.
+	 */
+	public static function browser_user_data( $ud ) {
+		if ( ! is_array( $ud ) || ! self::marketing_allowed() ) return array();
+		return self::valid_user_data( array_intersect_key( $ud, array_flip( array( 'em','ph','fn','ln','ct','st','zp','country' ) ) ) );
 	}
 
 	/** How long hashed matching data is remembered per browser ID. Default 10 minutes; opt-in up to 180 days. */

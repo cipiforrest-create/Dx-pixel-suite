@@ -37,20 +37,36 @@ class DXPS_Server {
 		// Those are not visitor conversions and would carry the administrator's cookies, IP and consent.
 		if ( is_admin() && ! wp_doing_ajax() ) return;
 		if ( wp_doing_ajax() && 'Login' !== $meta_name && ( current_user_can( 'create_users' ) || current_user_can( 'moderate_comments' ) ) ) return;
-		$user = $user_id ? array_filter( array(
-			'em'          => DXPS_Helpers::hash( get_userdata( $user_id )->user_email ?? '' ),
-			'external_id' => DXPS_Helpers::external_id(),
+		$user = $user_id ? array_merge( self::account_hashes( (int) $user_id ), array_filter( array(
+			// Browser ID (same hash the pixel sends) plus the account ID of the user who signed up / logged in.
+			'external_id' => array_values( array_filter( array( DXPS_Helpers::eid_out( DXPS_Helpers::external_id() ), hash( 'sha256', 'dxps.user.' . (int) $user_id ) ) ) ),
 			'fbp'         => DXPS_Helpers::fbp(),
 			'fbc'         => DXPS_Helpers::fbc(),
 			'client_ip_address' => self::ip(),
 			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
-		) ) : array_merge( DXPS_Helpers::user_data_full(), array_filter( array(
-			'external_id' => DXPS_Helpers::external_id(), 'fbp' => DXPS_Helpers::fbp(), 'fbc' => DXPS_Helpers::fbc(),
+		) ) ) : array_merge( DXPS_Helpers::user_data_full(), array_filter( array(
+			'external_id' => DXPS_Helpers::external_ids(), 'fbp' => DXPS_Helpers::fbp(), 'fbc' => DXPS_Helpers::fbc(),
 			'client_ip_address' => self::ip(),
 		) ) );
 		$eid = DXPS_Helpers::event_id( $ga4_name );
 		self::send_meta( $meta_name, $extra, $eid, $user );
 		self::send_ga4( $ga4_name, $extra, DXPS_Helpers::ga_client_id(), array(), $user_id ? (int) $user_id : null );
+	}
+
+	/**
+	 * 1.9.0: matching hashes from the account itself (email, name, and the WooCommerce billing phone / address when
+	 * present) plus a Facebook Login ID. Before, sign-up and login events carried the email only.
+	 */
+	private static function account_hashes( $user_id ) {
+		$u = get_userdata( $user_id );
+		if ( ! $u ) return array();
+		$m = function ( $k ) use ( $user_id ) { return (string) get_user_meta( $user_id, $k, true ); };
+		$country = $m( 'billing_country' );
+		return array_merge( DXPS_Helpers::matching_hashes( array(
+			'em' => $u->user_email, 'fn' => $u->first_name ?: $m( 'billing_first_name' ), 'ln' => $u->last_name ?: $m( 'billing_last_name' ),
+			'ph' => DXPS_Helpers::norm_phone( $m( 'billing_phone' ), $country ), 'ct' => $m( 'billing_city' ), 'st' => $m( 'billing_state' ),
+			'zp' => $m( 'billing_postcode' ), 'country' => $country,
+		) ), DXPS_Helpers::user_extra( $user_id ) );
 	}
 
 	public static function on_signup( $user_id )      { self::simple_user_event( 'CompleteRegistration', 'sign_up', $user_id ); }
@@ -93,8 +109,9 @@ class DXPS_Server {
 	private static function guard( WP_REST_Request $req ) {
 		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
 		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
-		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
-		if ( ! $host || $host !== $site ) return false;
+		// 1.9.0: www.example.com and example.com are the same site. A strict match rejected every request from
+		// the non-canonical host (403) and silently dropped those server events.
+		if ( ! DXPS_Helpers::same_site_host( $host ) ) return false;
 		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) return false;
 		$ip   = self::ip();
 		$rate = (int) get_transient( 'dxps_rl_' . md5( $ip ) );
@@ -140,8 +157,7 @@ class DXPS_Server {
 		// which silently killed all server events. Same-origin + rate limit instead.
 		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
 		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
-		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
-		if ( ! $host || $host !== $site ) {
+		if ( ! DXPS_Helpers::same_site_host( $host ) ) {
 			DXPS_Helpers::log( 'Relay rejected: bad origin', array( 'origin' => $origin ) );
 			return new WP_REST_Response( array( 'ok' => false ), 403 );
 		}
@@ -176,8 +192,13 @@ class DXPS_Server {
 
 		if ( ! DXPS_Helpers::on( 'meta_enabled' ) && ! DXPS_Helpers::on( 'ga4_enabled' ) ) return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'disabled' ), 200 );
 
-		// Geo fill-in (opt-in) goes first, so anything the customer actually gave overrides it.
-		$user = array_merge( DXPS_Helpers::geo_hashes(), DXPS_Helpers::user_data_full(), array_filter( array(
+		// Customer data, lowest priority first: geo fill-in (opt-in), then hashes the browser kept from an earlier
+		// form fill (1.9.0), then live / remembered server data. A different email means a different person, so
+		// the browser copy is dropped rather than mixed with someone else's details.
+		$live    = DXPS_Helpers::user_data_full();
+		$browser = DXPS_Helpers::browser_user_data( $req->get_param( 'ud' ) );
+		if ( ! empty( $browser['em'] ) && ! empty( $live['em'] ) && $browser['em'] !== $live['em'] ) $browser = array();
+		$user = array_merge( DXPS_Helpers::geo_hashes(), $browser, $live, array_filter( array(
 			'client_ip_address' => self::ip(),
 			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
 			'fbp'               => DXPS_Helpers::fbp(),
@@ -448,7 +469,7 @@ class DXPS_Server {
 			'fbp'               => $order->get_meta( '_dxps_fbp' ),
 			'fbc'               => $order->get_meta( '_dxps_fbc' ),
 			// Browser ID saved at checkout plus the account ID: both identify the same buyer.
-			'external_id'       => array_values( array_filter( array( $order->get_meta( '_dxps_eid' ), $from_order['external_id'] ?? '' ) ) ),
+			'external_id'       => array_values( array_filter( array( DXPS_Helpers::eid_out( $order->get_meta( '_dxps_eid' ) ), $from_order['external_id'] ?? '' ) ) ),
 		) ) );
 		$params['_dxps_marketing_allowed'] = true;
 		$params['_dxps_event_time'] = $event_time;
