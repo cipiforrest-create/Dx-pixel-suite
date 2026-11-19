@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.8.1
-Stable tag: 1.8.1
+Version: 1.9.0
+Stable tag: 1.9.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,30 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 1.9.0 =
+Event Match Quality (customer information parameters)
+* Fix: browser pixel events reached Meta with IP address and user agent only. Meta applies user data from the FIRST
+  fbq('init') of a pixel and rejects later ones (DUPLICATE_PIXEL_ID); DX initialised with no data and added the
+  external ID and form data through later re-inits, which Meta dropped. The first init now carries everything known.
+* The browser ID (pbid), _fbp and _fbc are created in the page head before the pixel starts, so the first PageView
+  already carries them in the browser and in its Conversions API copy. _fbp / _fbc use Meta's format and domain.
+* external_id is SHA-256 of the browser ID on BOTH channels (pixel and Conversions API), so Meta can join them.
+  Before, the server sent the raw ID. Purchases and sign-up / login events use the same value.
+* Form data: hashed matching values are kept in the visitor's browser for the "Remember matching data" period and
+  passed to the pixel's first init on later pages, and sent with every relayed event (lowest priority; a different
+  email means a different person and is not mixed in). Withdrawing consent deletes them.
+* Contact, booking and newsletter forms of Contact Form 7, WPForms, Elementor, Gravity, Fluent, Forminator, Ninja,
+  Mailchimp for WP and others are now scanned by default (filter dxps_am_lead_forms to turn off). Labels and
+  autocomplete attributes are read; Bosnian / Croatian / Serbian field words are recognised; a full-name field
+  ("Ime i prezime", your-name) is split into first and last name. Subject, message and coupon fields are ignored.
+* Sign-up and login events send the account's name, phone and address (WooCommerce billing) as well as the email.
+* Server relay accepted only the exact home_url host: requests from www.<site> were rejected (403) and their server
+  events lost. www and the bare domain are now the same site.
+* Phone default country works without WooCommerce (taken from the site language, e.g. bs_BA -> BA).
+* Admin: a warning with an "Apply recommended matching settings" button when matching settings are below the
+  recommendation (remember 90 days, all forms, phone country, browser ID fallback, form leads, country fill-in).
+  Saved settings are never changed without that click.
 
 = 1.8.1 =
 * Facebook Login ID is now also read from Nextend Social Login (its own database table), WooCommerce Social Login

@@ -110,13 +110,42 @@ gtag('set','url_passthrough',true);
 			echo "<script>window.dxpsBot=!!navigator.webdriver||/bot[\\/;]|adsbot|crawl|spider|slurp|headless|lighthouse|pagespeed|gtmetrix|pingdom|uptimerobot|statuscake|facebookexternalhit|scrape|phantomjs|ahrefs|semrush|bytespider/i.test(navigator.userAgent||'');</script>";
 		}
 
+		// 1.9.0: the Meta pixel ID (if any) must be known before the identity helper below runs.
+		echo '<script>window.dxpsMetaPixel=' . wp_json_encode( (string) $meta ) . ';window.dxpsAmTtl=' . (int) DXPS_Helpers::retention() . ';</script>';
+
 		// Shared interface: GTM's EynnaConsent and DX use the same withdrawal cookie.
 		echo <<<'DXPS_CONSENT_BRIDGE'
 <script>
 (function(w){
+var d=document;
+function gc(n){var m=('; '+d.cookie).match('; *'+n+'=([^;]*)');return m?m[1]:''}
+function sc(n,v,days,dm){d.cookie=n+'='+v+';path=/;max-age='+Math.round(days*86400)+(dm?';domain=.'+dm:'')+';SameSite=Lax'+(location.protocol==='https:'?';Secure':'')}
+/* Registrable domain (example.com for www.example.com) - the cookie scope Meta itself uses for _fbp/_fbc. */
+function root(){var h=location.hostname,p=h.split('.');if(p.length<2||/^[0-9.]+$/.test(h)||h.indexOf(':')>-1)return '';for(var i=p.length-2;i>=0;i--){var dm=p.slice(i).join('.'),t='_dxps_rd='+Date.now();d.cookie=t+';path=/;domain=.'+dm+';max-age=10;SameSite=Lax';if(d.cookie.indexOf(t)>-1){d.cookie='_dxps_rd=;path=/;domain=.'+dm+';max-age=0';return dm}}return ''}
+function hex(b){return Array.prototype.map.call(new Uint8Array(b),function(x){return ('0'+x.toString(16)).slice(-2)}).join('')}
+/* SHA-256 hex. Values that already are a 64-character hash are returned unchanged (same rule as DXPS_Helpers::eid_out). */
+w.dxpsSha=function(v){v=String(v||'').trim().toLowerCase();if(/^[a-f0-9]{64}$/.test(v))return Promise.resolve(v);if(!v||!w.crypto||!crypto.subtle||!w.TextEncoder)return Promise.resolve('');return crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)).then(hex,function(){return ''})};
+/* 1.9.0: first-party IDs exist BEFORE the Meta pixel starts, so the very first event (PageView) already carries
+   them in the browser and in the Conversions API copy. Returns the browser ID (pbid). */
+w.dxpsEnsureIds=function(){
+if(w.dxpsMarketingAllowed&&!w.dxpsMarketingAllowed())return '';
+var dm=('__dxpsRoot' in w)?w.__dxpsRoot:(w.__dxpsRoot=root()),id=gc('pbid').toLowerCase();
+if(!/^[a-f0-9]{32,64}$/.test(id)){var old=gc('_dxps_eid').toLowerCase();if(/^[a-f0-9]{32,64}$/.test(old))id=old;else if(w.crypto&&crypto.getRandomValues){var b=new Uint8Array(16);crypto.getRandomValues(b);id=hex(b.buffer)}else id='';if(id)sc('pbid',id,365)}
+if(w.dxpsMetaPixel){
+var lv=(dm||location.hostname).split('.').length-1;
+/* Same format Meta's script writes (fb.<subdomain index>.<ms>.<random>); fbevents.js keeps an existing valid _fbp. */
+if(!/^fb\.[0-9]\.[0-9]{13}\.[0-9]+$/.test(gc('_fbp')))sc('_fbp','fb.'+lv+'.'+Date.now()+'.'+Math.floor(1e9+Math.random()*9e9),90,dm);
+/* A new ad click (different fbclid) replaces the stored click ID; the same click keeps its timestamp. */
+var q=location.search.match(/[?&]fbclid=([A-Za-z0-9_-]{6,400})(?:&|$)/),fbc=gc('_fbc');
+if(q&&(!fbc||fbc.slice(-(q[1].length+1))!=='.'+q[1]))sc('_fbc','fb.'+lv+'.'+Date.now()+'.'+q[1],90,dm);
+}
+return id};
+/* Matching hashes kept in this browser from an earlier form fill (never plain values), for the retention period
+   set under "Remember matching data". Tied to the browser ID; removed when consent is withdrawn. */
+w.dxpsStoredAM=function(id){try{var r=localStorage.getItem('dxps_am');if(!r)return {};var s=JSON.parse(r),o={};if(!s||!s.d||!(s.x>Date.now())||(id&&s.k&&s.k!==id)){localStorage.removeItem('dxps_am');return {}}for(var k in s.d)if(/^(em|ph|fn|ln|ct|st|zp|country)$/.test(k)&&/^[a-f0-9]{64}$/.test(s.d[k]))o[k]=s.d[k];return o}catch(e){return {}}};
 function state(){var m=document.cookie.match(/(?:^|;\s*)_dxps_consent=(granted|denied)(?:;|$)/);if(m)return m[1];try{var s=localStorage.getItem('eh-consent');return s==='granted'||s==='denied'?s:''}catch(e){return ''}}
 w.dxpsMarketingAllowed=function(){return !w.dxpsBot&&state()!=='denied'&&(!(w.dxpsConsentRequired)||state()==='granted')};
-w.dxpsConsent=function(value){var g=value===true||value==='granted',s=g?'granted':'denied';document.cookie='_dxps_consent='+s+';path=/;max-age=15552000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');try{localStorage.setItem('eh-consent',s)}catch(e){}w.__ehConsentState={analytics_storage:s,ad_storage:s,ad_user_data:s,ad_personalization:s};gtag('consent','update',w.__ehConsentState);dataLayer.push({event:'consent_update',consent_state:s});if(g&&w.dxpsInitIdentity)w.dxpsInitIdentity();if(g&&w.dxpsInitMeta)w.dxpsInitMeta();document.dispatchEvent(new CustomEvent('dxps:consent',{detail:s}))};
+w.dxpsConsent=function(value){var g=value===true||value==='granted',s=g?'granted':'denied';if(!g){try{localStorage.removeItem('dxps_am')}catch(e){}}document.cookie='_dxps_consent='+s+';path=/;max-age=15552000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');try{localStorage.setItem('eh-consent',s)}catch(e){}w.__ehConsentState={analytics_storage:s,ad_storage:s,ad_user_data:s,ad_personalization:s};gtag('consent','update',w.__ehConsentState);dataLayer.push({event:'consent_update',consent_state:s});if(g&&w.dxpsInitIdentity)w.dxpsInitIdentity();if(g&&w.dxpsInitMeta)w.dxpsInitMeta();document.dispatchEvent(new CustomEvent('dxps:consent',{detail:s}))};
 w.EynnaConsent=w.EynnaConsent||{};w.EynnaConsent.update=w.dxpsConsent;
 var saved=state();if(saved)w.dxpsConsent(saved);
 })(window);
@@ -141,14 +170,28 @@ DXPS_CONSENT_BRIDGE;
 
 		/* ---- Meta Pixel (consent-gated in EEA) ---- */
 		if ( $meta ) {
-			$adv = self::advanced_matching_js();
 			$px  = esc_js( $meta );
 			// 1.7.0 (opt-in): Meta Limited Data Use, geolocated by Meta (country 0, state 0).
 			$ldu = DXPS_Helpers::on( 'meta_ldu' ) ? "fbq('dataProcessingOptions',['LDU'],0,0);" : '';
-			echo "<script>
+			/*
+			 * 1.9.0: Meta's pixel applies user data only from the FIRST fbq('init') for a pixel ID; a second init
+			 * is rejected as DUPLICATE_PIXEL_ID once user data exists. The browser ID, the _fbp cookie and any
+			 * matching hashes this browser kept therefore go into that first init. Before, init carried nothing
+			 * and the later re-inits were dropped, so browser events reached Meta with IP address and user agent only.
+			 * external_id is SHA-256 of the browser ID - the same value the Conversions API sends.
+			 */
+			$init = <<<'DXPS_META_INIT'
+<script>
 window.dxpsMetaReady=false;
-window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}fbq('init','{$px}'{$adv});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
-</script>\n";
+window.dxpsInitMeta=function(){var w=window;if(w.dxpsMetaReady||w.dxpsMetaStarting||(w.dxpsMarketingAllowed&&!w.dxpsMarketingAllowed()))return;w.dxpsMetaStarting=true;
+!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(w,document,'script','https://connect.facebook.net/en_US/fbevents.js');
+var id=w.dxpsEnsureIds?w.dxpsEnsureIds():'',ud=w.dxpsStoredAM?w.dxpsStoredAM(id):{};
+var go=function(xid){if(w.dxpsMetaReady)return;if(xid)ud.external_id=xid;w.dxpsMetaReady=true;__LDU__fbq('init','__PX__',ud);var pv='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','__PX__','PageView',{},{eventID:pv});if(w.dxpsMetaPageView)w.dxpsMetaPageView(pv);else w.dxpsPendingPageView=pv;(w.dxpsQ||[]).forEach(function(a){fbq.apply(null,a)});w.dxpsQ=[];};
+var h=id&&w.dxpsSha?w.dxpsSha(id):Promise.resolve('');
+Promise.race([h,new Promise(function(r){setTimeout(function(){r('')},400)})]).then(go,function(){go('')});};
+</script>
+DXPS_META_INIT;
+			echo strtr( $init, array( '__PX__' => $px, '__LDU__' => $ldu ) ) . "\n";
 			if ( DXPS_Helpers::marketing_allowed() ) {
 				echo "<script>window.dxpsInitMeta();</script>\n";
 			}
@@ -199,6 +242,9 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			'autoAm'    => ( DXPS_Helpers::on( 'auto_am' ) && ( $meta || $ga4 ) ) ? 1 : 0,
 			// ---- 1.7.0 (all opt-in) ----
 			'amAll'       => DXPS_Helpers::on( 'am_all_forms' ) ? 1 : 0,
+			// 1.9.0: contact / booking / newsletter forms of common form plugins feed matching data by default.
+			// Return false from the dxps_am_lead_forms filter to limit detection to checkout and account forms again.
+			'amLeadForms' => apply_filters( 'dxps_am_lead_forms', true ) ? 1 : 0,
 			'urlIdentity' => DXPS_Helpers::on( 'auto_am' ) ? DXPS_Helpers::url_identity() : array(),
 			'baseCountry' => DXPS_Helpers::on( 'phone_default_country' ) ? strtolower( DXPS_Helpers::default_country() ) : '',
 			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,
@@ -226,19 +272,6 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 		return $out;
 	}
 
-	/**
-	 * Meta Advanced Matching object for fbq('init').
-	 *
-	 * Legacy implementation sent normalized values; the Meta pixel library hashes
-	 * them in the browser before transmission — nothing leaves the visitor's device
-	 * unhashed. Previously these were pre-hashed here, which made the pixel hash them a
-	 * second time; the double-hash matched nothing, so browser Advanced Matching was
-	 * effectively dead weight and EMQ suffered. (Server CAPI still uses hashed values.)
-	 */
-	private static function advanced_matching_js() {
-		// Customer data is never placed in cacheable HTML.
-		return '';
-	}
 	public static function enqueue() {
 		if ( self::off() ) return;
 		$deps = array( 'jquery' );

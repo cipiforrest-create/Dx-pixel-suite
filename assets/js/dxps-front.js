@@ -9,7 +9,10 @@
 	function blocked(p){var u=location.href;try{u=decodeURIComponent(u)}catch(e){}return !!cfg.blockedContext||sensitiveRx.test(u+' '+JSON.stringify(p||{}));}
 	function safeUrl(v){try{var u=new URL(v,location.href);return u.origin===location.origin?u.origin+u.pathname.replace(/\/(order-received|order-pay)\/\d+\/?$/, '/') : location.origin+'/';}catch(e){return location.origin+'/';}}
 	function waitMatching(p){return Promise.race([Promise.resolve(p),new Promise(function(resolve){setTimeout(resolve,750)})]);}
-	function relay(body,attempt){if(!cfg.relay||blocked(body.params)||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return Promise.resolve();return fetch(cfg.relay,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){if((r.status===429||r.status>=500)&&!attempt)return new Promise(function(resolve){setTimeout(resolve,1000)}).then(function(){return relay(body,1)});return r;}).catch(function(){if(!attempt)return relay(body,1);});}
+	// 1.9.0: matching hashes this browser kept from an earlier form fill travel with every relayed event, so the
+	// Conversions API copy still carries them after the server-side copy has expired or was evicted from cache.
+	function storedAM(){return window.dxpsStoredAM?window.dxpsStoredAM(getCookie('pbid').toLowerCase()):{};}
+	function relay(body,attempt){if(!attempt&&!body.ud){var ud=storedAM();if(Object.keys(ud).length)body.ud=ud;}if(!cfg.relay||blocked(body.params)||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return Promise.resolve();return fetch(cfg.relay,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){if((r.status===429||r.status>=500)&&!attempt)return new Promise(function(resolve){setTimeout(resolve,1000)}).then(function(){return relay(body,1)});return r;}).catch(function(){if(!attempt)return relay(body,1);});}
 
 	/* ---------- identity cookies ---------- */
 	function getCookie(n) {
@@ -21,7 +24,8 @@
 	}
 	window.dxpsInitIdentity = function(){
 	if (blocked() || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;
-	// External ID (first-party cross-session identifier) — cookie name: pbid.
+	// External ID (pbid), _fbp and _fbc: created in the page head before the pixel starts (1.9.0).
+	if (window.dxpsEnsureIds) window.dxpsEnsureIds();
 	if (getCookie('_dxps_eid') && !getCookie('pbid')) setCookie('pbid', getCookie('_dxps_eid'), 365); // migrate
 	if (!getCookie('pbid')) {
 		var eid = ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, function (c) {
@@ -54,7 +58,7 @@
 		setCookie('_fbp', 'fb.1.' + Date.now() + '.' + Math.floor(Math.random() * 9e9 + 1e9), 90);
 	}, 2500);
 
-	if(META_PIXEL&&window.dxpsMetaReady&&typeof fbq==='function'&&getCookie('pbid')){try{fbq('init',META_PIXEL,{external_id:getCookie('pbid')});}catch(e){}}
+	// No second fbq('init') here: Meta ignores it (DUPLICATE_PIXEL_ID). external_id is set in the first init.
 	if (!getCookie('_dxps_lp')) setCookie('_dxps_lp', encodeURIComponent(safeUrl(location.href).slice(0, 300)), 90);
 	};
 	window.dxpsInitIdentity();
@@ -451,34 +455,66 @@
 		function normalize(k,v,c){v=String(v||'').trim().toLowerCase();c=c||cfg.baseCountry||'';if(k==='ph'){var n=v.replace(/\D/g,''),cc={ba:'387',rs:'381',hr:'385',si:'386',de:'49',at:'43',ch:'41',me:'382',mk:'389',gb:'44',us:'1',ca:'1',fr:'33',it:'39',nl:'31',se:'46'}[c];if(/^00/.test(v))n=n.slice(2);else if(!/^\+/.test(v)){if(!cc)return '';if(n.indexOf(cc)!==0)n=cc+n.replace(/^0+/, '');}return /^[1-9]\d{7,14}$/.test(n)?n:'';}if(k==='em')return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)?v:'';if(k==='country')return /^[a-z]{2}$/.test(v)?v:'';if(k==='zp'){v=v.replace(/[^a-z0-9]/g,'');return c==='us'?v.slice(0,5):v;}return v.replace(/[^\p{L}]/gu,'');}
 		function digest(v){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)).then(function(buf){return Array.from(new Uint8Array(buf)).map(function(n){return n.toString(16).padStart(2,'0')}).join('')});}
 
-		var AM_BLOCK = /pass|pwd|card|cc-|cvv|cvc|csc|iban|swift|account.*number|routing|secur|diagnos|health|medical|birth|gender/i;
+		var AM_BLOCK = /pass|pwd|card|cc-|cvv|cvc|csc|iban|swift|account.*number|routing|secur|diagnos|health|medical|birth|gender|coupon|kupon|promo/i;
+		// Field words are matched at the start of a word in the field's name, id, autocomplete, aria-label,
+		// placeholder and (1.9.0) its <label> text, in English and Bosnian / Croatian / Serbian.
+		function amRx(p) { return new RegExp('(?:^|[\\s_\\-\\[\\].:])(?:' + p + ')', 'i'); }
 		var AM_RULES = [
-			{ k: 'em', re: /(^|[_\-\[.])(email|e-mail|mail|billing_email|user_email)/i, type: 'email' },
-			{ k: 'ph', re: /(^|[_\-\[.])(phone|tel|mobile|billing_phone|telefon)/i, type: 'tel' },
-			{ k: 'fn', re: /(^|[_\-\[.])(fname|firstname|first_name|given|billing_first_name|ime)/i },
-			{ k: 'ln', re: /(^|[_\-\[.])(lname|lastname|last_name|surname|family|billing_last_name|prezime)/i },
-			{ k: 'ct', re: /(^|[_\-\[.])(city|town|billing_city|grad)/i },
-			{ k: 'zp', re: /(^|[_\-\[.])(zip|postcode|postal|billing_postcode|posta)/i },
-			{ k: 'st', re: /(^|[_\-\[.])(state|province|region|billing_state)/i },
-			{ k: 'country', re: /(^|[_\-\[.])(country|billing_country|drzava)/i }
+			{ k: 'em', re: amRx('e-?mail|mail|billing_email|user_email') },
+			{ k: 'ph', re: amRx('phone|tel|mobile|mobitel|telefon|gsm|billing_phone') },
+			// Full-name fields come before first/last name: "Ime i prezime" contains both words.
+			{ k: 'name', re: amRx('ime\\s*(?:i|&|/|\\+)?\\s*prezime|imeprezime|full[\\s_-]?name|fullname|your[\\s_-]?name|name\\s*(?:and|&|/)\\s*surname') },
+			{ k: 'fn', re: amRx('fname|first[\\s_-]?name|firstname|first\\]|given|billing_first_name|ime') },
+			{ k: 'ln', re: amRx('lname|last[\\s_-]?name|lastname|last\\]|surname|family|billing_last_name|prezime') },
+			// A plain "name" field (Elementor form_fields[name], CF7 your-name, ...) holds the full name.
+			{ k: 'name', re: /(?:^|[\s_\-\[.:])name(?:$|[\s_\-\]\d:*])/i, not: /user|login|company|firm|organi|business|product|file|nick|account|domain|holder|subject|naslov|predmet/i },
+			{ k: 'ct', re: amRx('city|town|billing_city|grad|mjesto|mesto') },
+			{ k: 'zp', re: amRx('zip|postcode|postal|billing_postcode|posta|poštanski|postanski') },
+			{ k: 'st', re: amRx('state|province|region|billing_state|kanton') },
+			{ k: 'country', re: amRx('country|billing_country|drzava|država') }
 		];
+		var AM_AUTOCOMPLETE = { email: 'em', tel: 'ph', 'tel-national': 'ph', 'given-name': 'fn', 'family-name': 'ln', name: 'name',
+			'address-level2': 'ct', 'address-level1': 'st', 'postal-code': 'zp', country: 'country' };
+		// Checkout / account forms, forms opted in with data-dxps-match and (1.9.0) the contact, booking and
+		// newsletter forms of common form plugins, where visitors enter their own contact details to be contacted.
+		// The "All forms" setting widens this to every form. data-dxps-ignore on a form or field always excludes it.
+		var AM_FORMS = 'form.checkout,form.woocommerce-checkout,form.woocommerce-form-login,form.woocommerce-form-register,form.woocommerce-EditAccountForm,[data-dxps-match],.wc-block-checkout'
+			+ (cfg.amLeadForms ? ',.wpcf7-form,.wpforms-form,.elementor-form,.gform_wrapper form,.frm-fluent-form,.fluentform form,.forminator-custom-form,.nf-form-cont form,.mc4wp-form,.et_pb_contact_form,.brxe-form,.wsf-form,.jet-form-builder,.wp-block-jetpack-contact-form,.kb-form,.sib-form form,.ml-block-form,.wpbf-form,.bricks-form' : '');
 
 		function amClassify(el) {
-			if(!el.closest)return null;
-			if(el.type==='search'||el.closest('form[role=search],.search-form,.woocommerce-product-search'))return null;
-			// Default: checkout/account forms and forms opted in with data-dxps-match. Opt-in setting: any form.
-			if(!(cfg.amAll&&el.closest('form'))&&!el.closest('form.checkout,form.woocommerce-checkout,form.woocommerce-form-login,form.woocommerce-form-register,form.woocommerce-EditAccountForm,[data-dxps-match],.wc-block-checkout'))return null;
-			if(el.disabled||el.type==='hidden'||!el.checkValidity()||el.closest('[data-dxps-ignore]'))return null;
-			var hay = [el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.placeholder]
-				.filter(Boolean).join(' ');
+			if(!el.closest||(el.tagName!=='INPUT'&&el.tagName!=='SELECT'))return null;
+			if(/^(search|password|hidden|checkbox|radio|submit|button|file|image|reset|date|datetime-local|time|range|color)$/i.test(el.type||''))return null;
+			if(el.closest('form[role=search],.search-form,.woocommerce-product-search'))return null;
+			if(!(cfg.amAll&&el.closest('form'))&&!el.closest(AM_FORMS))return null;
+			if(el.disabled||!el.checkValidity()||el.closest('[data-dxps-ignore]'))return null;
+			var label = el.labels && el.labels.length ? Array.prototype.map.call(el.labels, function (l) { return l.textContent || ''; }).join(' ').slice(0, 120) : '';
+			var hay = [el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.placeholder, label]
+				.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 			if (!hay) return null;
-			if (AM_BLOCK.test(hay) || el.type === 'password' || el.getAttribute('data-dxps-ignore') !== null) return null;
+			if (AM_BLOCK.test(hay) || el.getAttribute('data-dxps-ignore') !== null) return null;
 			if (el.type === 'email') return 'em';
 			if (el.type === 'tel') return 'ph';
+			var ac = AM_AUTOCOMPLETE[String(el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).pop()];
+			if (ac) return ac;
 			for (var i = 0; i < AM_RULES.length; i++) {
-				if (AM_RULES[i].re.test(hay)) return AM_RULES[i].k;
+				if (AM_RULES[i].re.test(hay) && !(AM_RULES[i].not && AM_RULES[i].not.test(hay))) return AM_RULES[i].k;
 			}
 			return null;
+		}
+		// Does the field's form also have a separate last-name field? (Then a first-name field is just that.)
+		function amFormHasLn(el) {
+			var f = el.closest('form,[data-dxps-match]'); if (!f) return false;
+			var list = f.querySelectorAll('input'); for (var i = 0; i < list.length; i++) if (list[i] !== el && amClassify(list[i]) === 'ln') return true;
+			return false;
+		}
+
+		// 1.9.0: keep the SHA-256 hashes (never plain values) in this browser for the "Remember matching data"
+		// period, tied to the browser ID. The page head passes them to the pixel's first init on later pages.
+		// A different email starts a new set (different person); withdrawing consent deletes them.
+		function amKeep(hashed){
+			var ttl=(window.dxpsAmTtl||600)*1000,id=getCookie('pbid').toLowerCase();if(!id)return;
+			try{var cur=storedAM();if(cur.em&&hashed.em&&cur.em!==hashed.em)cur={};
+				localStorage.setItem('dxps_am',JSON.stringify({d:Object.assign(cur,hashed),x:Date.now()+ttl,k:id}));}catch(e){}
 		}
 
 		function amFlush() {
@@ -487,10 +523,15 @@
 			var raw=amFound,payload={},country=normalize('country',raw.country||'');amFound={};
 			Object.keys(raw).forEach(function(k){var v=normalize(k,raw[k],country);if(v)payload[k]=v;});
 			var sig=JSON.stringify(payload);if(!Object.keys(payload).length||sig===amLast)return amPending;amLast=sig;
-			if (META_PIXEL && window.dxpsMetaReady && typeof fbq==='function') {try {fbq('init',META_PIXEL,payload);}catch(e){}}
-			if(cfg.userIngest && crypto.subtle) amPending=amPending.catch(function(){}).then(function(){
+			// No fbq('init') here: Meta applies user data only from the first init of a pixel (later ones are
+			// dropped as DUPLICATE_PIXEL_ID). The hashes reach Meta through the Conversions API copy of each event
+			// right away, and through the browser pixel's first init on every later page (kept below).
+			if(!window.crypto||!crypto.subtle) return amPending;
+			amPending=amPending.catch(function(){}).then(function(){
 				if(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed())return;
-				return Promise.all(Object.keys(payload).map(function(k){return digest(payload[k]).then(function(v){return [k,v]})})).then(function(pairs){var hashed={};pairs.forEach(function(v){hashed[v[0]]=v[1]});return fetch(cfg.userIngest,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({user:hashed,hashed:true,url:safeUrl(location.href)})});});
+				return Promise.all(Object.keys(payload).map(function(k){return digest(payload[k]).then(function(v){return [k,v]})})).then(function(pairs){var hashed={};pairs.forEach(function(v){hashed[v[0]]=v[1]});
+					amKeep(hashed);
+					if(cfg.userIngest)return fetch(cfg.userIngest,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({user:hashed,hashed:true,url:safeUrl(location.href)})});});
 			});
 			return amPending;
 		}
@@ -514,11 +555,20 @@
 			if (!el || !el.value || el.value.length < 2 || el.value.length > 200) return;
 			var key = amClassify(el);
 			if (!key) return;
-			var v = el.value.trim().toLowerCase();
+			var v = el.value.trim().toLowerCase().replace(/\s+/g, ' ');
 			if (key === 'em' && v.indexOf('@') === -1) return;
 			if (key === 'ph' && v.replace(/[^0-9]/g, '').length < 6) return;
-			if (amFound[key] === v) return;
-			amFound[key] = v;
+			// "Ime" typed as "Amir Hodžić" in a form without a last-name field is a full name.
+			if (key === 'fn' && v.indexOf(' ') > 0 && !amFormHasLn(el)) key = 'name';
+			if (key === 'name') {
+				// Full name -> first name + last name (Meta matches them as separate fields).
+				var sp = v.split(' '), fn = sp[0], ln = sp.slice(1).join(' ');
+				if (amFound.fn === fn && (!ln || amFound.ln === ln)) return;
+				amFound.fn = fn; if (ln) amFound.ln = ln;
+			} else {
+				if (amFound[key] === v) return;
+				amFound[key] = v;
+			}
 			var countryEl=el.closest('form,.wc-block-checkout,[data-dxps-match]')?.querySelector('[name=billing_country],select[autocomplete=country],input[autocomplete=country]');if(countryEl&&countryEl.value)amFound.country=countryEl.value.toLowerCase();
 			clearTimeout(amTimer);
 			amTimer = setTimeout(amFlush, 800); // debounce: one call per burst of typing
