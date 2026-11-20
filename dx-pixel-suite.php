@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: WooCommerce and content tracking with Meta Pixel/CAPI, GA4, Google Ads, consent controls and scheduled product catalogues for Google, Meta, Pinterest and Microsoft.
- * Version:     2.2.0
+ * Version:     2.3.0
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '2.2.0' );
+define( 'DXPS_VERSION', '2.3.0' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -74,11 +74,11 @@ register_activation_hook( __FILE__, function () {
 		'excluded_coupons'    => 'alopeci',     // never sent to any platform
 		'debug_log'           => 0,
 		// 1.7.0 - every new feature is off until switched on
-		'am_retention_days'     => 0,       // 0 = 10 minutes; up to 180 days
-		'am_all_forms'          => 0,
+		'am_retention_days'     => 90,      // 2.3.0 default 90 days (browser cookie of hashes); 0 = 10 minutes; max 180
+		'am_all_forms'          => 1,       // 2.3.0: on by default
 		'url_identity'          => '',
-		'phone_default_country' => 0,
-		'fbp_fallback'          => 0,
+		'phone_default_country' => 1,       // 2.3.0: on by default
+		'fbp_fallback'          => 1,       // 2.3.0: on by default
 		'track_form_leads'      => 0,
 		'track_outbound'        => 0,
 		'block_bots'            => 0,
@@ -94,7 +94,7 @@ register_activation_hook( __FILE__, function () {
 		'content_engaged'       => 1,
 		'content_read_scroll'   => 50,
 		'content_read_time'     => 30,
-		'geo_enrich'            => '',      // '' | country | full
+		'geo_enrich'            => 'country', // '' | country | full (2.3.0 default: country)
 		// 2.2.0
 		'gads_merchant_id'      => '',      // Merchant Center ID: cart data on the Google Ads purchase conversion
 		'gads_feed_country'     => '',
@@ -124,6 +124,17 @@ add_action( 'plugins_loaded', function () {
 			$changed = false;
 			foreach ( DXPS_Helpers::FALLBACKS as $k => $v ) {
 				if ( ! array_key_exists( $k, $o ) ) { $o[ $k ] = $v; $changed = true; }
+			}
+			// 2.3.0 (once): switch on the match-quality settings that were opt-in before. Only values still at their
+			// old default are changed, so anything set by hand stays as it is.
+			if ( version_compare( (string) get_option( 'dxps_version', '0' ), '2.3.0', '<' ) && ! get_option( 'dxps_emq_230' ) ) {
+				if ( empty( $o['am_retention_days'] ) ) $o['am_retention_days'] = 90;
+				foreach ( array( 'am_all_forms', 'phone_default_country', 'fbp_fallback' ) as $k ) {
+					if ( empty( $o[ $k ] ) ) $o[ $k ] = 1;
+				}
+				if ( empty( $o['geo_enrich'] ) ) $o['geo_enrich'] = 'country';
+				$changed = true;
+				update_option( 'dxps_emq_230', time(), false );
 			}
 			if ( $changed ) update_option( 'dxps_settings', $o );
 		}

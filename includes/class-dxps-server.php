@@ -38,14 +38,13 @@ class DXPS_Server {
 		// Those are not visitor conversions and would carry the administrator's cookies, IP and consent.
 		if ( is_admin() && ! wp_doing_ajax() ) return;
 		if ( wp_doing_ajax() && 'Login' !== $meta_name && ( current_user_can( 'create_users' ) || current_user_can( 'moderate_comments' ) ) ) return;
-		$user = $user_id ? array_filter( array(
-			'em'          => DXPS_Helpers::hash( get_userdata( $user_id )->user_email ?? '' ),
-			'external_id' => DXPS_Helpers::external_id(),
+		$user = $user_id ? array_merge( DXPS_Helpers::account_user_data( $user_id ), array_filter( array(
+			'external_id' => array_values( array_filter( array( DXPS_Helpers::external_id(), hash( 'sha256', 'dxps.user.' . (int) $user_id ) ) ) ),
 			'fbp'         => DXPS_Helpers::fbp(),
 			'fbc'         => DXPS_Helpers::fbc(),
 			'client_ip_address' => self::ip(),
 			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
-		) ) : array_merge( DXPS_Helpers::user_data_full(), array_filter( array(
+		) ) ) : array_merge( DXPS_Helpers::user_data_full(), array_filter( array(
 			'external_id' => DXPS_Helpers::external_id(), 'fbp' => DXPS_Helpers::fbp(), 'fbc' => DXPS_Helpers::fbc(),
 			'client_ip_address' => self::ip(),
 		) ) );
@@ -241,6 +240,10 @@ class DXPS_Server {
 		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok'=>false ), 403 );
 		$eid = DXPS_Helpers::external_id();
 		if ( $eid ) delete_transient( 'dxps_eid_' . substr( $eid, 0, 32 ) );
+		// 2.3.0: the browser's hashed matching cookie goes too (the consent bridge also deletes it in JavaScript).
+		if ( isset( $_COOKIE[ DXPS_Helpers::UD_COOKIE ] ) && ! headers_sent() ) {
+			setcookie( DXPS_Helpers::UD_COOKIE, '', array( 'expires' => time() - 3600, 'path' => '/', 'secure' => is_ssl(), 'httponly' => false, 'samesite' => 'Lax' ) );
+		}
 		foreach ( array( 'pbid','_dxps_eid' ) as $cookie ) if ( isset( $_COOKIE[$cookie] ) && is_string( $_COOKIE[$cookie] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[$cookie] ) ) delete_transient( 'dxps_eid_' . substr( strtolower( $_COOKIE[$cookie] ), 0, 32 ) );
 		return new WP_REST_Response( array( 'ok'=>true ), 200 );
 	}

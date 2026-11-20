@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
 Version: 2.1.0
-Stable tag: 2.2.0
+Stable tag: 2.3.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,17 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 2.3.0 =
+* Meta Event Match Quality. Customer data now reaches the pixel: Meta uses only the first fbq('init') of a pixel and ignored the re-inits DX used for form data and server-held data. The first init now carries the visitor's hashed email, phone, name and address together with the browser ID.
+* New first-party cookie _dxps_ud keeps a visitor's hashed matching fields (SHA-256 only) for the "Remember matching data" period, so returning visitors and cached pages are matched. Deleted on consent withdrawal.
+* Server relay keeps the customer's identity: signed-in customers are recognised even when the page's REST nonce has expired, and guests' checkout billing is read from their WooCommerce session.
+* Correct visitor IP behind Cloudflare and local proxies (was the proxy's address unless the host restored it). Forwarding headers are trusted only when the request really came through a proxy.
+* Wider form detection: autocomplete and label text, full-name fields split into first and last name (CF7 your-name, "Ime i prezime"), WPForms, Gravity Forms and Elementor name fields, email and phone inputs outside forms.
+* Login and sign-up events send the account's names, phone and address, not only the email.
+* Phone country falls back to the site language when WooCommerce is not active.
+* Defaults: remember matching data 90 days, all forms, phone default country, browser ID fallback and country fill-in are switched on (existing sites once, on update; hand-set values stay).
+* Diagnostics: shows how the visitor IP is resolved; coverage table includes state.
 
 = 2.2.0 =
 * Fixed GA4 attribution: campaign and click-ID parameters (utm_*, gclid, gbraid, wbraid, msclkid) stay in the page address sent to GA4. All other URL parameters are still removed.

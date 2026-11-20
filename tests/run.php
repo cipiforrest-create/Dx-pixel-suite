@@ -55,6 +55,57 @@ $_COOKIE['pbid'] = strtoupper( hash( 'sha256', 'x' ) );
 ok( hash( 'sha256', 'x' ) === DXPS_Helpers::external_id(), '64-character browser ID is used as it is (matches the pixel)' );
 ok( '' === DXPS_Helpers::safe_label( 'Perike za alopeciju' ) && 'Clip-in' === DXPS_Helpers::safe_label( 'Clip-in' ), 'health-related labels are never used' );
 
+/* 2.3.0: browser-held matching cookie, merge order, relay identity, visitor IP, phone country */
+echo "Match quality (2.3.0)\n";
+settings( array( 'auto_am' => 1, 'consent_mode' => 0 ) );
+$em = hash( 'sha256', 'guest@example.com' ); $ph = hash( 'sha256', '38761123456' );
+$_COOKIE = array( 'pbid' => str_repeat( 'ef', 16 ), '_dxps_ud' => 'em.' . $em . '~ph.' . $ph . '~fn.NOT-A-HASH~xx.' . $em );
+$GLOBALS['t']['user'] = 0;
+$ud = DXPS_Helpers::cookie_user_data();
+ok( $ud === array( 'em' => $em, 'ph' => $ph ), 'matching cookie: only 64-hex values of known keys are read' );
+ok( 'em.' . $em . '~ph.' . $ph === DXPS_Helpers::ud_cookie_value( array( 'em' => $em, 'ph' => $ph, 'client_ip_address' => '1.2.3.4' ) ), 'cookie value holds matching hashes only' );
+$_COOKIE['_dxps_ud'] = str_repeat( 'a', 1300 );
+ok( array() === DXPS_Helpers::cookie_user_data(), 'oversized matching cookie is ignored' );
+$_COOKIE['_dxps_ud'] = 'em.' . $em . '~ph.' . $ph;
+$full = DXPS_Helpers::user_data_full();
+ok( $em === ( $full['em'] ?? '' ) && $ph === ( $full['ph'] ?? '' ), 'a returning guest is matched from the browser cookie alone' );
+$GLOBALS['t']['user'] = 7; $GLOBALS['t']['transients'] = array();
+$full = DXPS_Helpers::user_data_full();
+ok( hash( 'sha256', 'jane@example.com' ) === $full['em'] && ! isset( $full['ph'] ), 'cookie of a different person (other email) is never mixed with the account' );
+settings( array( 'auto_am' => 1, 'consent_mode' => 1 ) );
+ok( array() === DXPS_Helpers::cookie_user_data(), 'no consent: the matching cookie is not used' );
+settings( array( 'auto_am' => 1, 'consent_mode' => 0 ) );
+
+define( 'LOGGED_IN_COOKIE', 'wordpress_logged_in_test' ); define( 'REST_REQUEST', true );
+$GLOBALS['t']['user'] = 0; $GLOBALS['t']['auth_user'] = 42; $_COOKIE = array( 'pbid' => str_repeat( 'ef', 16 ), LOGGED_IN_COOKIE => 'x' );
+ok( 42 === DXPS_Helpers::visitor_user_id(), 'relay without a valid nonce still recognises the signed-in customer' );
+$ids = DXPS_Helpers::external_ids();
+ok( 2 === count( $ids ) && in_array( hash( 'sha256', 'dxps.user.42' ), $ids, true ), 'account external ID is sent from the relay too' );
+ok( hash( 'sha256', 'user42@example.com' ) === ( DXPS_Helpers::user_data_current()['em'] ?? '' ), 'account email reaches relayed events' );
+$acc = DXPS_Helpers::account_user_data( 42 );
+ok( isset( $acc['em'], $acc['fn'], $acc['ln'] ) && hash( 'sha256', 'anamarić' ) !== $acc['fn'] && hash( 'sha256', 'ana' ) === $acc['fn'], 'login / sign-up events carry profile names, not just the email' );
+$GLOBALS['t']['auth_user'] = 0; $_COOKIE = array();
+ok( 0 === DXPS_Helpers::visitor_user_id(), 'no logged-in cookie, no account' );
+
+$srv = $_SERVER;
+$_SERVER['REMOTE_ADDR'] = '172.70.1.1'; $_SERVER['HTTP_CF_CONNECTING_IP'] = '89.146.10.20';
+ok( '89.146.10.20' === DXPS_Helpers::client_ip() && 'cloudflare' === DXPS_Helpers::ip_setup(), 'behind Cloudflare the visitor address is used, not the edge server' );
+$_SERVER['REMOTE_ADDR'] = '2a06:98c1:3120::1';
+ok( '89.146.10.20' === DXPS_Helpers::client_ip(), 'Cloudflare IPv6 edge recognised' );
+$_SERVER['REMOTE_ADDR'] = '89.146.10.30'; $_SERVER['HTTP_CF_CONNECTING_IP'] = '8.8.8.8'; $_SERVER['HTTP_X_FORWARDED_FOR'] = '8.8.4.4';
+ok( '89.146.10.30' === DXPS_Helpers::client_ip() && 'direct' === DXPS_Helpers::ip_setup(), 'direct request: forged forwarding headers are ignored' );
+$_SERVER['REMOTE_ADDR'] = '10.0.0.5'; unset( $_SERVER['HTTP_CF_CONNECTING_IP'] ); $_SERVER['HTTP_X_FORWARDED_FOR'] = '8.8.4.4, 89.146.10.40, 10.0.0.2';
+ok( '89.146.10.40' === DXPS_Helpers::client_ip() && 'proxy' === DXPS_Helpers::ip_setup(), 'local proxy: the address it added is used, a forged left-most entry is not' );
+$_SERVER['HTTP_X_FORWARDED_FOR'] = '89.146.10.50, 172.70.1.1'; $_SERVER['HTTP_CF_CONNECTING_IP'] = '89.146.10.50';
+ok( '89.146.10.50' === DXPS_Helpers::client_ip(), 'local proxy behind Cloudflare: visitor address, not the edge' );
+$_SERVER = $srv;
+
+settings( array( 'phone_default_country' => 1 ) ); $GLOBALS['t']['locale'] = 'bs_BA';
+ok( '+38761123456' === DXPS_Helpers::norm_phone( '061 123 456' ), 'local phone number gets the country from the site language' );
+settings( array() );
+ok( '' === DXPS_Helpers::norm_phone( '061 123 456' ), 'without the setting a local number is still dropped' );
+$GLOBALS['t']['locale'] = 'en_US';
+
 /* ---------------- relay ---------------- */
 echo "Relay\n";
 settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'meta_capi_token' => 'tok', 'auto_am' => 1, 'consent_mode' => 0 ) );
@@ -93,6 +144,20 @@ $_SERVER['REQUEST_URI'] = '/product/1/';
 ob_start(); DXPS_Tracking::head_output(); $head = ob_get_clean();
 ok( false !== strpos( $head, 'dxpsPageUrl' ) && false !== strpos( $head, '"adsMerchant":{"id":5551234,"country":"BA"}' ) && false !== strpos( $head, '"uid":"u7"' ), 'head output carries the new configuration' );
 file_put_contents( __DIR__ . '/.page.html', '<!doctype html><html><head><title>Clip-in set</title>' . $head . '</head><body><script src="/jquery-stub.js"></script><script src="/dxps-front.js"></script></body></html>' );
+ok( false !== strpos( $head, hash( 'sha256', 'jane@example.com' ) ) && false !== strpos( $head, "fbq('init','123',am)" ), 'signed-in page: the first pixel init carries the hashed account data' );
+ok( false !== strpos( $head, '"udTtl":' ), 'cookie lifetime handed to the browser' );
+// Guest page (what a page cache would serve): no customer data in the HTML, the browser cookie supplies it.
+$GLOBALS['t']['user'] = 0; $_COOKIE = array();
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'am_all_forms' => 1, 'phone_default_country' => 1, 'am_retention_days' => 90 ) );
+$GLOBALS['t']['locale'] = 'bs_BA'; // site language decides the phone country without WooCommerce
+ob_start(); DXPS_Tracking::head_output(); $guest = ob_get_clean();
+ok( false !== strpos( $guest, '"baseCountry":"ba"' ), 'phone country from the site language reaches the browser' );
+ok( false === strpos( $guest, 'jane' ) && false === strpos( $guest, hash( 'sha256', 'jane@example.com' ) ) && false !== strpos( $guest, 'var am={}' ), 'cacheable guest page carries no customer data' );
+file_put_contents( __DIR__ . '/.page-guest.html', '<!doctype html><html><head><title>Kontakt</title>' . $guest . '</head><body>'
+	. '<form id="kontakt"><label for="f-name">Ime i prezime</label><input id="f-name" name="your-name" type="text">'
+	. '<input name="your-email" type="email"><label for="f-tel">Broj telefona</label><input id="f-tel" name="field_3" type="text">'
+	. '<input name="your-subject" type="text"><input name="password" type="password"></form>'
+	. '<script src="/jquery-stub.js"></script><script src="/dxps-front.js"></script></body></html>' );
 
 echo $fail ? "\n$fail FAILED\n" : "\nAll PHP checks passed\n";
 exit( $fail ? 1 : 0 );

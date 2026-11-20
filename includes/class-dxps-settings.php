@@ -209,7 +209,7 @@ class DXPS_Settings {
 		echo '<p class="description" style="margin-top:6px"><strong>Never captured:</strong> passwords, payment card numbers, CVV/CVC, IBAN. Add <code>data-dxps-ignore</code> to any other field you want excluded. Matching fields are validated, normalized and SHA-256 hashed before the first-party form-ingest request. Only matching hashes are retained briefly. Browser Advanced Matching uses Meta’s own hashing. No customer information is embedded in cacheable page HTML. Requires the server relay for the CAPI half. Make sure your privacy policy and cookie banner cover this before enabling it in the EEA.</p>';
 		echo '</td></tr>';
 		echo '<tr><th>All forms</th><td>'; self::c( 'am_all_forms', 'Detect customer data in every form, not only checkout and account forms', 'Covers contact, newsletter and booking forms without adding <code>data-dxps-match</code>. Search boxes, passwords, payment fields and anything marked <code>data-dxps-ignore</code> stay excluded.' ); echo '</td></tr>';
-		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long the hashed matching data is kept for a returning browser, so later events (page views, add to cart) still carry it. <strong>0 = 10 minutes</strong> (default). 90 is typical. Only SHA-256 hashes are stored, they are deleted when consent is withdrawn, and your privacy policy should state the period.</p></td></tr>';
+		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long a visitor&#8217;s browser keeps the hashed matching data (cookie <code>_dxps_ud</code>), so the first pixel event of every later visit, and the server copies, still carry it. <strong>90 days is the default since 2.3.0</strong>; 0 = 10 minutes. Only SHA-256 hashes are stored, never readable values; the cookie is deleted when consent is withdrawn. Your privacy policy should state the period.</p></td></tr>';
 		echo '<tr><th>URL parameters</th><td><textarea name="url_identity" class="large-text" rows="3" placeholder="email | em' . "\n" . 'phone | ph' . "\n" . 'name | name">' . esc_textarea( DXPS_Helpers::opt( 'url_identity' ) ) . '</textarea><p class="description">One per line: <code>url_parameter | field</code>. For email, SMS or booking links that arrive with customer details in the URL (for example <code>?email=…&amp;phone=…</code>). Fields: <code>em</code> <code>ph</code> <code>fn</code> <code>ln</code> <code>name</code> (full name) <code>ct</code> <code>st</code> <code>zp</code> <code>country</code>. Values are hashed in the browser and never sent as part of a page URL.</p></td></tr>';
 		echo '<tr><th>Phone numbers</th><td>'; self::c( 'phone_default_country', 'Assume the store country for phone numbers written without a country code', 'Meta only matches phone numbers that include a country code. Without this, local-format numbers from forms that have no country field are dropped.' ); echo '</td></tr>';
 		echo '<tr><th>Browser ID fallback</th><td>'; self::c( 'fbp_fallback', 'Create the _fbp browser ID cookie when Meta&#8217;s script is blocked', 'Ad blockers stop Meta&#8217;s script, so it never sets <code>_fbp</code> and server events lose that signal. DX then creates the cookie in Meta&#8217;s own format, after consent.' ); echo '</td></tr>';
@@ -299,13 +299,21 @@ class DXPS_Settings {
 		echo '<h2>Facebook Login ID</h2><p>' . ( $fbn > 0
 			? '<span style="color:#00a32a;font-weight:600">' . (int) $fbn . ' account(s)</span> have a Facebook Login ID that DX can read. It is sent with server events while that customer is logged in, and with their purchases.'
 			: '<span style="color:#d63638;font-weight:600">None found.</span> DX reads the ID from Nextend Social Login, WooCommerce Social Login, Super Socializer and common user-meta fields. If your login plugin stores it elsewhere, tell your developer the meta key and add it with the <code>dxps_fb_login_meta_keys</code> filter.' ) . '</p>';
+		// 2.3.0: which address DX sends as the visitor IP. A wrong IP (a Cloudflare or proxy server) lowers match quality.
+		$setup = DXPS_Helpers::ip_setup();
+		$labels = array(
+			'cloudflare' => 'Requests arrive through <strong>Cloudflare</strong>. DX uses the visitor address Cloudflare passes on (<code>CF-Connecting-IP</code>).',
+			'proxy'      => 'Requests arrive through a <strong>local proxy or load balancer</strong>. DX uses the visitor address in its forwarding headers.',
+			'direct'     => 'Requests arrive <strong>directly</strong> (or the host already restores visitor addresses). DX uses the connection address.',
+		);
+		echo '<h2>Visitor IP address</h2><p>' . $labels[ $setup ] . ' Address detected for your own request: <code>' . esc_html( DXPS_Helpers::client_ip() ?: 'none' ) . '</code>. It should match the address shown by any &#8220;what is my IP&#8221; site. If it does not, use the <code>dxps_client_ip</code> filter.</p>';
 		echo '<h2>Matching-field coverage</h2>';
 		if ( ! DXPS_Helpers::on( 'event_log' ) ) {
 			echo '<p>The event log is off. Turn on <strong>Event log</strong> on the Events &amp; Parameters tab, browse the shop and place a test order, then come back here.</p>';
 		}
 		if ( ! $log ) { echo '<p>No server events recorded yet.</p>'; return; }
 
-		$fields = array( 'em' => 'Email', 'ph' => 'Phone', 'fn' => 'First name', 'ln' => 'Last name', 'ct' => 'City', 'zp' => 'ZIP', 'country' => 'Country', 'external_id' => 'External ID', 'fbp' => 'Browser ID (fbp)', 'fbc' => 'Click ID (fbc)', 'client_ip_address' => 'IP', 'client_user_agent' => 'User agent', 'fb_login_id' => 'FB Login ID' );
+		$fields = array( 'em' => 'Email', 'ph' => 'Phone', 'fn' => 'First name', 'ln' => 'Last name', 'ct' => 'City', 'st' => 'State / region', 'zp' => 'ZIP', 'country' => 'Country', 'external_id' => 'External ID', 'fbp' => 'Browser ID (fbp)', 'fbc' => 'Click ID (fbc)', 'client_ip_address' => 'IP', 'client_user_agent' => 'User agent', 'fb_login_id' => 'FB Login ID' );
 		$by = array();
 		foreach ( $log as $row ) {
 			$e = (string) ( $row['e'] ?? '' );

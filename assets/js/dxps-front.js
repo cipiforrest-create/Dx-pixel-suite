@@ -14,11 +14,26 @@
 	   call instead of one each. Flushed after a short pause and whenever the page is being left. */
 	var relayBuf=[],relayTimer=null,amSig='';
 	function allowed(){return !window.dxpsMarketingAllowed||window.dxpsMarketingAllowed();}
+	/* 2.3.0: hashed matching fields are kept in the first-party cookie _dxps_ud (em.<sha256>~ph.<sha256>...).
+	   Meta reads customer data only from the FIRST fbq('init') of a pixel and ignores later inits, so the data is
+	   stored here and the head script passes it to the first init of every following page. Only 64-character
+	   SHA-256 values are stored; a different email means a different person and replaces the old fields. */
+	var UD_KEYS=/^(em|ph|fn|ln|ct|st|zp|country)$/,HEX64=/^[a-f0-9]{64}$/;
+	function readUd(){var out={},m=document.cookie.match(/(?:^|;\s*)_dxps_ud=([^;]*)/);if(m)m[1].split('~').forEach(function(p){var kv=p.split('.');if(kv.length===2&&UD_KEYS.test(kv[0])&&HEX64.test(kv[1]))out[kv[0]]=kv[1];});return out;}
+	function saveUd(h){
+		if(!h||!allowed()||blocked())return;
+		var cur=readUd(),add={};Object.keys(h).forEach(function(k){if(UD_KEYS.test(k)&&HEX64.test(String(h[k])))add[k]=String(h[k]);});
+		if(!Object.keys(add).length)return;
+		if(add.em&&cur.em&&add.em!==cur.em)cur={};
+		Object.keys(add).forEach(function(k){cur[k]=add[k];});
+		var v=Object.keys(cur).map(function(k){return k+'.'+cur[k];}).join('~');
+		if(v===amSig)return;amSig=v;
+		document.cookie='_dxps_ud='+v+';path=/;max-age='+Math.max(60,parseInt(cfg.udTtl,10)||600)+';SameSite=Lax'+(location.protocol==='https:'?';Secure':'');
+	}
+	window.dxpsSaveUd=saveUd;
 	function applyAm(j){
-		// Hashed matching fields the server already holds for this visitor (logged-in profile, checkout, earlier forms).
-		// The pixel accepts SHA-256 values as they are, so browser events get the same match quality as server events.
-		if(!j||!j.am||!META_PIXEL||!window.dxpsMetaReady||typeof fbq!=='function'||!allowed())return;
-		var sig=JSON.stringify(j.am);if(sig===amSig)return;amSig=sig;try{fbq('init',META_PIXEL,j.am);}catch(e){}
+		// Hashed matching fields the server holds for this visitor (logged-in profile, checkout, earlier forms).
+		if(j&&j.am)saveUd(j.am);
 	}
 	function relaySend(body,attempt){
 		if(!allowed())return Promise.resolve();
@@ -90,7 +105,6 @@
 		setCookie('_fbp', 'fb.1.' + Date.now() + '.' + Math.floor(Math.random() * 9e9 + 1e9), 90);
 	}, 2500);
 
-	if(META_PIXEL&&window.dxpsMetaReady&&typeof fbq==='function'&&getCookie('pbid')){try{fbq('init',META_PIXEL,{external_id:getCookie('pbid')});}catch(e){}}
 	if (!getCookie('_dxps_lp')) setCookie('_dxps_lp', encodeURIComponent(safeUrl(location.href).slice(0, 300)), 90);
 	};
 	window.dxpsInitIdentity();
@@ -510,11 +524,11 @@
 	}
 
 	/* ---------- Automatic Advanced Matching: detect customer fields in forms ----------
-	   Scans inputs the visitor fills in (checkout, contact, account, newsletter) and feeds
-	   what it finds into both channels: the Meta pixel re-init (browser Advanced Matching,
-	   plain values which the pixel hashes locally) and the /u endpoint (which hashes them
-	   server-side and stores them for CAPI). This is what raises Meta's "percent of events
-	   sending" for phone / first name / last name / city / zip.
+	   Scans inputs the visitor fills in (checkout, contact, account, newsletter), hashes what it
+	   finds in the browser (SHA-256) and keeps the hashes in the _dxps_ud cookie: the server copies
+	   of this page's events read it at once, and the first pixel init of every later page carries it
+	   (2.3.0; Meta ignores re-inits). This is what raises Meta's "percent of events sending" for
+	   phone / first name / last name / city / zip.
 
 	   NEVER captured: passwords, payment card numbers, CVV/CVC, IBAN, or any field marked
 	   with data-dxps-ignore. Those exclusions are matched first and are absolute. */
@@ -524,31 +538,54 @@
 		function digest(v){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)).then(function(buf){return Array.from(new Uint8Array(buf)).map(function(n){return n.toString(16).padStart(2,'0')}).join('')});}
 
 		var AM_BLOCK = /pass|pwd|card|cc-|cvv|cvc|csc|iban|swift|account.*number|routing|secur|diagnos|health|medical|birth|gender/i;
+		/* 2.3.0: field detection. Order matters: a full-name field ("Ime i prezime", CF7 your-name, Elementor
+		   form_fields[name]) is recognised before first / last name, and the generic "name" rule comes last.
+		   Matched against name, id, autocomplete, aria-label, placeholder and the field's <label> text. */
+		var B = '(^|[_\\-\\[.\\s(])';
 		var AM_RULES = [
-			{ k: 'em', re: /(^|[_\-\[.])(email|e-mail|mail|billing_email|user_email)/i, type: 'email' },
-			{ k: 'ph', re: /(^|[_\-\[.])(phone|tel|mobile|billing_phone|telefon)/i, type: 'tel' },
-			{ k: 'fn', re: /(^|[_\-\[.])(fname|firstname|first_name|given|billing_first_name|ime)/i },
-			{ k: 'ln', re: /(^|[_\-\[.])(lname|lastname|last_name|surname|family|billing_last_name|prezime)/i },
-			{ k: 'ct', re: /(^|[_\-\[.])(city|town|billing_city|grad)/i },
-			{ k: 'zp', re: /(^|[_\-\[.])(zip|postcode|postal|billing_postcode|posta)/i },
-			{ k: 'st', re: /(^|[_\-\[.])(state|province|region|billing_state)/i },
-			{ k: 'country', re: /(^|[_\-\[.])(country|billing_country|drzava)/i }
+			{ k: 'name', re: new RegExp(B + '(full[_\\- ]?name|your-name|ime[_\\- ]?(i[_\\- ])?prezime|imeprezime|ime\\s*&\\s*prezime|vollst[aä]ndiger name)', 'i') },
+			{ k: 'em', re: new RegExp(B + '(email|e-mail|mail|billing_email|user_email)', 'i') },
+			{ k: 'ph', re: new RegExp(B + '(phone|tel|mobile|mobitel|billing_phone|telefon|broj[_\\- ]telefona|kontakt[_\\- ]?broj)', 'i') },
+			{ k: 'fn', re: new RegExp(B + '(fname|firstname|first[_\\- ]?name|given|billing_first_name|name_first|ime|vorname)($|[_\\-\\].\\s*:)])', 'i') },
+			{ k: 'fn', re: /\[first\]/i },
+			{ k: 'ln', re: new RegExp(B + '(lname|lastname|last[_\\- ]?name|surname|family|billing_last_name|name_last|prezime|nachname)', 'i') },
+			{ k: 'ln', re: /\[last\]/i },
+			{ k: 'ct', re: new RegExp(B + '(city|town|billing_city|grad|mjesto|ort)($|[_\\-\\].\\s*:)])', 'i') },
+			{ k: 'zp', re: new RegExp(B + '(zip|postcode|postal|billing_postcode|po[sš]tanski|posta|plz)', 'i') },
+			{ k: 'st', re: new RegExp(B + '(state|province|region|billing_state|kanton|entitet)', 'i') },
+			{ k: 'country', re: new RegExp(B + '(country|billing_country|dr[zž]ava|land)($|[_\\-\\].\\s*:)])', 'i') },
+			{ k: 'name', re: new RegExp(B + '(name|ime)($|[_\\-\\].\\s*:)])', 'i') }
 		];
+		var AM_NOT_PERSON = /user|login|company|firma|organi[sz]ation|business|product|coupon|nick|kupon|naziv|subject|naslov|card/i;
+		// Standard autocomplete tokens are the most reliable signal and are read first.
+		var AM_AUTOCOMPLETE = { email:'em', tel:'ph', 'tel-national':'ph', 'given-name':'fn', 'family-name':'ln', name:'name', 'address-level2':'ct', 'address-level1':'st', 'postal-code':'zp', country:'country' };
+		function amLabel(el){var t='';try{if(el.labels&&el.labels.length)t=el.labels[0].textContent||'';else if(el.id){var l=document.querySelector('label[for="'+(window.CSS&&CSS.escape?CSS.escape(el.id):el.id)+'"]');if(l)t=l.textContent||'';}}catch(e){}return t.replace(/\s+/g,' ').trim().slice(0,80);}
 
 		function amClassify(el) {
 			if(!el.closest)return null;
 			if(el.type==='search'||el.closest('form[role=search],.search-form,.woocommerce-product-search'))return null;
 			// Default: checkout/account forms and forms opted in with data-dxps-match. Opt-in setting: any form.
-			if(!(cfg.amAll&&el.closest('form'))&&!el.closest('form.checkout,form.woocommerce-checkout,form.woocommerce-form-login,form.woocommerce-form-register,form.woocommerce-EditAccountForm,[data-dxps-match],.wc-block-checkout'))return null;
-			if(el.disabled||el.type==='hidden'||!el.checkValidity()||el.closest('[data-dxps-ignore]'))return null;
-			var hay = [el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.placeholder]
+			// All forms (setting, on by default since 2.3.0) also covers email / phone inputs outside a <form>
+			// (popups, block checkout); otherwise only checkout / account forms and data-dxps-match containers.
+			var anyForm=cfg.amAll&&(el.closest('form')||el.type==='email'||el.type==='tel');
+			if(!anyForm&&!el.closest('form.checkout,form.woocommerce-checkout,form.woocommerce-form-login,form.woocommerce-form-register,form.woocommerce-EditAccountForm,[data-dxps-match],.wc-block-checkout'))return null;
+			if(el.disabled||el.type==='hidden'||el.type==='checkbox'||el.type==='radio'||!el.checkValidity()||el.closest('[data-dxps-ignore]'))return null;
+			var ac=String(el.getAttribute('autocomplete')||'').toLowerCase().split(/\s+/).pop();
+			var hay = [el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.placeholder, amLabel(el)]
 				.filter(Boolean).join(' ');
 			if (!hay) return null;
 			if (AM_BLOCK.test(hay) || el.type === 'password' || el.getAttribute('data-dxps-ignore') !== null) return null;
 			if (el.type === 'email') return 'em';
 			if (el.type === 'tel') return 'ph';
+			if (AM_AUTOCOMPLETE[ac]) return AM_AUTOCOMPLETE[ac];
+			// Gravity Forms name field: input_<form>.3 = first, input_<form>.6 = last.
+			if (/^input_\d+\.3$/.test(el.name || '')) return 'fn';
+			if (/^input_\d+\.6$/.test(el.name || '')) return 'ln';
 			for (var i = 0; i < AM_RULES.length; i++) {
-				if (AM_RULES[i].re.test(hay)) return AM_RULES[i].k;
+				if (AM_RULES[i].re.test(hay)) {
+					if ((AM_RULES[i].k === 'name' || AM_RULES[i].k === 'fn' || AM_RULES[i].k === 'ln') && AM_NOT_PERSON.test(hay)) return null;
+					return AM_RULES[i].k;
+				}
 			}
 			return null;
 		}
@@ -559,10 +596,9 @@
 			var raw=amFound,payload={},country=normalize('country',raw.country||'');amFound={};
 			Object.keys(raw).forEach(function(k){var v=normalize(k,raw[k],country);if(v)payload[k]=v;});
 			var sig=JSON.stringify(payload);if(!Object.keys(payload).length||sig===amLast)return amPending;amLast=sig;
-			if (META_PIXEL && window.dxpsMetaReady && typeof fbq==='function') {try {fbq('init',META_PIXEL,payload);}catch(e){}}
 			if(window.crypto && crypto.subtle) amPending=amPending.catch(function(){}).then(function(){
 				if(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed())return;
-				return Promise.all(Object.keys(payload).map(function(k){return digest(payload[k]).then(function(v){return [k,v]})})).then(function(pairs){var hashed={};pairs.forEach(function(v){hashed[v[0]]=v[1]});var email=payload.em||'';if(/@(gmail|googlemail)\.com$/.test(email)){var ep=email.split('@');email=ep[0].replace(/\./g,'')+'@'+ep[1];}return Promise.all([email?digest(email):'',payload.ph?digest('+'+payload.ph):'']).then(function(g){if(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed())return;var gd={};if(g[0])gd.sha256_email_address=g[0];if(g[1])gd.sha256_phone_number=g[1];window.__ehHashedCustomerData={google:gd};if(!cfg.userIngest)return;return fetch(cfg.userIngest,{method:'POST',credentials:'same-origin',keepalive:true,headers:apiHeaders(),body:JSON.stringify({user:hashed,hashed:true,url:safeUrl(location.href)})});});});
+				return Promise.all(Object.keys(payload).map(function(k){return digest(payload[k]).then(function(v){return [k,v]})})).then(function(pairs){var hashed={};pairs.forEach(function(v){hashed[v[0]]=v[1]});saveUd(hashed);var email=payload.em||'';if(/@(gmail|googlemail)\.com$/.test(email)){var ep=email.split('@');email=ep[0].replace(/\./g,'')+'@'+ep[1];}return Promise.all([email?digest(email):'',payload.ph?digest('+'+payload.ph):'']).then(function(g){if(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed())return;var gd={};if(g[0])gd.sha256_email_address=g[0];if(g[1])gd.sha256_phone_number=g[1];window.__ehHashedCustomerData={google:gd};if(!cfg.userIngest)return;return fetch(cfg.userIngest,{method:'POST',credentials:'same-origin',keepalive:true,headers:apiHeaders(),body:JSON.stringify({user:hashed,hashed:true,url:safeUrl(location.href)})});});});
 			});
 			return amPending;
 		}
@@ -589,8 +625,17 @@
 			var v = el.value.trim().toLowerCase();
 			if (key === 'em' && v.indexOf('@') === -1) return;
 			if (key === 'ph' && v.replace(/[^0-9]/g, '').length < 6) return;
-			if (amFound[key] === v) return;
-			amFound[key] = v;
+			if (key === 'name') {
+				// One field for the whole name: first word = first name, the rest = last name.
+				var parts = v.split(/\s+/).filter(Boolean);
+				if (!parts.length) return;
+				if (amFound.fn === parts[0] && amFound.ln === (parts.slice(1).join(' ') || amFound.ln)) return;
+				amFound.fn = parts[0];
+				if (parts.length > 1) amFound.ln = parts.slice(1).join(' ');
+			} else {
+				if (amFound[key] === v) return;
+				amFound[key] = v;
+			}
 			var countryEl=el.closest('form,.wc-block-checkout,[data-dxps-match]')?.querySelector('[name=billing_country],select[autocomplete=country],input[autocomplete=country]');if(countryEl&&countryEl.value)amFound.country=countryEl.value.toLowerCase();
 			clearTimeout(amTimer);
 			amTimer = setTimeout(amFlush, 800); // debounce: one call per burst of typing

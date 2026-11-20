@@ -20,6 +20,9 @@ class DXPS_Tracking {
 		// slow/blocked front-end script prevents our JS capture from ever running, which the
 		// JS-only approach cannot cover. Must run on 'init', before any output.
 		add_action( 'init', array( __CLASS__, 'capture_fbclid_early' ), 1 );
+		// 2.3.0: hand what the server knows about this visitor (account, checkout billing) to the browser's hashed
+		// matching cookie, so the first pixel init of every later page - cached ones too - carries it.
+		add_action( 'template_redirect', array( __CLASS__, 'sync_identity_cookie' ), 1 );
 
 		add_action( 'wp_head', array( __CLASS__, 'head_output' ), 1 );
 		add_action( 'wp_enqueue_scripts', array( __CLASS__, 'enqueue' ) );
@@ -66,6 +69,41 @@ class DXPS_Tracking {
 			'samesite' => 'Lax',
 		) );
 		$_COOKIE['_fbc'] = $fbc; // usable immediately within this same request
+	}
+
+	/** 2.3.0: keep the _dxps_ud cookie in step with live data; removes it when consent is not (or no longer) given. */
+	public static function sync_identity_cookie() {
+		if ( self::off() || DXPS_Helpers::sensitive_context( $_SERVER['REQUEST_URI'] ?? '/' ) ) return;
+		DXPS_Helpers::sync_ud_cookie( self::live_matching() );
+	}
+
+	/** Hashed live matching data for this page: the account / WooCommerce customer, or the order on its thank-you page. */
+	private static function live_matching() {
+		static $live = null;
+		if ( null !== $live ) return $live;
+		$live = array();
+		if ( ! DXPS_Helpers::marketing_allowed() ) return $live;
+		$order = self::received_order();
+		$live = $order ? DXPS_Helpers::user_data_from_order( $order ) : DXPS_Helpers::user_data_current();
+		$live = array_intersect_key( DXPS_Helpers::valid_user_data( $live ), array_flip( DXPS_Helpers::MATCH_KEYS ) );
+		return $live;
+	}
+
+	/** The order shown on the thank-you page, only with its valid order key (as WooCommerce itself requires). */
+	private static function received_order() {
+		if ( ! function_exists( 'is_order_received_page' ) || ! is_order_received_page() ) return null;
+		global $wp;
+		$id    = isset( $wp->query_vars['order-received'] ) ? absint( $wp->query_vars['order-received'] ) : 0;
+		$order = $id ? wc_get_order( $id ) : null;
+		$key   = isset( $_GET['key'] ) && is_string( $_GET['key'] ) ? wc_clean( wp_unslash( $_GET['key'] ) ) : '';
+		return ( $order && $key && hash_equals( (string) $order->get_order_key(), $key ) ) ? $order : null;
+	}
+
+	/** Pages no page cache serves to other visitors: signed-in visitors, cart, checkout, thank-you and account pages. */
+	private static function uncacheable_page() {
+		if ( is_user_logged_in() ) return true;
+		if ( ! function_exists( 'is_cart' ) ) return false;
+		return is_cart() || is_checkout() || is_account_page() || ( function_exists( 'is_order_received_page' ) && is_order_received_page() );
 	}
 
 	/** 1.7.0: staff / test roles excluded from tracking. Decided once per request. */
@@ -139,7 +177,7 @@ if(typeof w.fbq==='function')w.fbq('consent',g?'grant':'revoke');
 if(g){if(w.dxpsInitIdentity)w.dxpsInitIdentity();if(w.dxpsInitMeta)w.dxpsInitMeta();}
 else{
  if(w.dxpsCfg&&w.dxpsCfg.forgetUrl)fetch(w.dxpsCfg.forgetUrl,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:'{}'}).catch(function(){});
- ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lt','_dxps_lp','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
+ ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lt','_dxps_lp','_dxps_ud','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
  try{sessionStorage.removeItem('eh_customer_hashes');Object.keys(localStorage).forEach(function(k){if(k.indexOf('eh_')===0||k.indexOf('dxps_')===0)localStorage.removeItem(k)})}catch(e){}
  w.__ehHashedCustomerData=null;w.dxpsQ=[];gtag('set','user_data',null);
 }
@@ -175,7 +213,7 @@ DXPS_CONSENT_BRIDGE;
 			$ldu = DXPS_Helpers::on( 'meta_ldu' ) ? "fbq('dataProcessingOptions',['LDU'],0,0);" : '';
 			echo "<script>
 window.dxpsMetaReady=false;
-window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}var x='';try{var m=document.cookie.match(/(?:^|;\\s*)pbid=([a-f0-9]{32,64})(?:;|$)/i);if(m)x=m[1].toLowerCase();else{var a=crypto.getRandomValues(new Uint8Array(16));for(var i=0;i<16;i++)x+=('0'+a[i].toString(16)).slice(-2);document.cookie='pbid='+x+';path=/;max-age=31536000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');}}catch(e){x=''}fbq('init','{$px}',x?{external_id:x}:{});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
+window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}var x='';try{var m=document.cookie.match(/(?:^|;\\s*)pbid=([a-f0-9]{32,64})(?:;|$)/i);if(m)x=m[1].toLowerCase();else{var a=crypto.getRandomValues(new Uint8Array(16));for(var i=0;i<16;i++)x+=('0'+a[i].toString(16)).slice(-2);document.cookie='pbid='+x+';path=/;max-age=31536000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');}}catch(e){x=''}var am={$adv},c={};try{var u=document.cookie.match(/(?:^|;\\s*)_dxps_ud=([^;]*)/);if(u)u[1].split('~').forEach(function(p){var kv=p.split('.');if(kv.length===2&&/^(em|ph|fn|ln|ct|st|zp|country)$/.test(kv[0])&&/^[a-f0-9]{64}$/.test(kv[1]))c[kv[0]]=kv[1];});}catch(e){}if(am.em&&c.em&&am.em!==c.em)c={};Object.keys(c).forEach(function(k){if(!am[k])am[k]=c[k];});if(x)am.external_id=x;fbq('init','{$px}',am);var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
 </script>\n";
 			if ( DXPS_Helpers::marketing_allowed() ) {
 				echo "<script>window.dxpsInitMeta();</script>\n";
@@ -241,6 +279,7 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			'autoAm'    => ( DXPS_Helpers::on( 'auto_am' ) && ( $meta || $ga4 ) ) ? 1 : 0,
 			// ---- 1.7.0 (all opt-in) ----
 			'amAll'       => DXPS_Helpers::on( 'am_all_forms' ) ? 1 : 0,
+			'udTtl'       => (int) DXPS_Helpers::retention(), // 2.3.0: lifetime of the hashed matching cookie, seconds
 			'urlIdentity' => DXPS_Helpers::on( 'auto_am' ) ? DXPS_Helpers::url_identity() : array(),
 			'baseCountry' => DXPS_Helpers::on( 'phone_default_country' ) ? strtolower( DXPS_Helpers::default_country() ) : '',
 			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,
@@ -268,18 +307,15 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 		return $out;
 	}
 
-	/**
-	 * Meta Advanced Matching object for fbq('init').
-	 *
-	 * Legacy implementation sent normalized values; the Meta pixel library hashes
-	 * them in the browser before transmission — nothing leaves the visitor's device
-	 * unhashed. Previously these were pre-hashed here, which made the pixel hash them a
-	 * second time; the double-hash matched nothing, so browser Advanced Matching was
-	 * effectively dead weight and EMQ suffered. (Server CAPI still uses hashed values.)
-	 */
+	/** Meta Advanced Matching object (JSON) for the first fbq('init'): hashed live data on pages no cache shares. */
 	private static function advanced_matching_js() {
-		// Customer data is never placed in cacheable HTML.
-		return '';
+		// 2.3.0: Meta reads customer data only from the FIRST fbq('init') of a pixel (a second init of the same pixel
+		// is ignored), so it has to be there from the start. Customer data is never placed in cacheable HTML: only
+		// on pages no cache serves to someone else, and only as SHA-256 hashes, which the pixel sends unchanged.
+		// Every other page reads the same hashes from the visitor's own _dxps_ud cookie in the browser.
+		if ( ! DXPS_Helpers::on( 'auto_am' ) || ! self::uncacheable_page() ) return '{}';
+		$live = self::live_matching();
+		return $live ? wp_json_encode( $live ) : '{}';
 	}
 	public static function enqueue() {
 		if ( self::off() ) return;
@@ -471,6 +507,8 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 		$order->update_meta_data( '_dxps_consent_recorded_at', time() );
 		if ( ! $allowed ) return;
 		DXPS_Helpers::remember_user_data( DXPS_Helpers::user_data_from_order( $order ) );
+		// 2.3.0: the buyer's browser keeps the hashed billing data, so the thank-you page and later visits match.
+		DXPS_Helpers::sync_ud_cookie( DXPS_Helpers::user_data_from_order( $order ) );
 		$order->update_meta_data( '_dxps_fbp', DXPS_Helpers::fbp() );
 		$order->update_meta_data( '_dxps_fbc', DXPS_Helpers::fbc() );
 		$order->update_meta_data( '_dxps_eid', DXPS_Helpers::external_id() );

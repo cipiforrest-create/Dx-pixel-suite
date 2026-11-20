@@ -63,7 +63,11 @@ function wp_strip_all_tags( $v ) { return trim( strip_tags( (string) $v ) ); } f
 function is_wp_error( $v ) { return $v instanceof WP_Error; }
 function is_user_logged_in() { return $GLOBALS['t']['user'] > 0; } function get_current_user_id() { return $GLOBALS['t']['user']; }
 function wp_get_current_user() { $u = new stdClass; $u->roles = $GLOBALS['t']['user'] ? array( 'customer' ) : array(); $u->user_email = 'jane@example.com'; $u->first_name = 'Jane'; $u->last_name = 'Doe'; $u->exists = null; return new class( $u ) { public $roles, $user_email, $first_name, $last_name; function __construct( $u ) { foreach ( get_object_vars( $u ) as $k => $v ) $this->$k = $v; } function exists() { return $GLOBALS['t']['user'] > 0; } }; }
-function get_user_meta() { return ''; } function current_user_can() { return false; }
+function get_user_meta() { return ''; }
+// 2.3.0: account lookup, auth-cookie validation (REST relay identity) and site locale.
+function get_userdata( $id ) { if ( ! $id ) return false; $u = new stdClass; $u->ID = $id; $u->roles = array( 'customer' ); $u->user_email = 'user' . $id . '@example.com'; $u->first_name = 'Ana'; $u->last_name = 'Marić'; return $u; }
+function wp_validate_auth_cookie( $c = '', $s = '' ) { return ! empty( $_COOKIE[ LOGGED_IN_COOKIE ] ) ? ( $GLOBALS['t']['auth_user'] ?? 0 ) : false; }
+function get_locale() { return $GLOBALS['t']['locale'] ?? 'en_US'; } function current_user_can() { return false; }
 function is_admin() { return false; } function wp_doing_ajax() { return false; } function wp_doing_cron() { return false; }
 function wp_generate_uuid4() { return sprintf( '%08x-%04x-4%03x-a%03x-%012x', mt_rand(), mt_rand( 0, 0xffff ), mt_rand( 0, 0xfff ), mt_rand( 0, 0xfff ), mt_rand() ); }
 function wp_remote_post( $url, $args ) { $GLOBALS['t']['http'][] = array( 'url' => $url, 'body' => json_decode( $args['body'], true ), 'headers' => $args['headers'] ); return array( 'code' => 200, 'body' => json_encode( array( 'events_received' => count( json_decode( $args['body'], true )['data'] ?? array( 1 ) ) ) ) ); }

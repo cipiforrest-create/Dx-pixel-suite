@@ -18,6 +18,7 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 		if (u.endsWith('/jquery-stub.js')) return route.fulfill({ contentType: 'text/javascript', body: jq });
 		if (u.endsWith('/dxps-front.js')) return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(__dirname, '../assets/js/dxps-front.js'), 'utf8') });
 		if (u.startsWith('http://shop.test/product/')) return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(__dirname, '.page.html'), 'utf8') });
+		if (u.startsWith('http://shop.test/kontakt/')) return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(__dirname, '.page-guest.html'), 'utf8') });
 		return route.abort(); // Meta / Google libraries: only the calls made to them matter here
 	});
 	const errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -46,7 +47,10 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 	ok(/_dxps_lt=/.test(s.cookie) && /_dxps_src=/.test(s.cookie) && /_fbc=fb\.1\.\d+\.IwAR0abcdef/.test(s.cookie), 'first-touch, last-touch and click-ID cookies');
 	ok(relays.length === 1 && relays[0].events.map(e => e.name).join() === 'page_view,view_item,add_to_cart', 'one relay request for the burst, purchase excluded: ' + relays.map(r => r.events.map(e => e.name).join()).join(' / '));
 	ok(relays[0] && !Object.keys(relays[0].events[2].params).some(k => k[0] === '_') && relays[0].events[1].url === 'http://shop.test/product/1/', 'internal fields and query strings stay out of the relay');
-	ok(s.fbq.some(c => c[0] === 'init' && c[2] && c[2].em === 'e'.repeat(64)), 'matching fields from the server reach the pixel');
+	const sha = v => require('crypto').createHash('sha256').update(v).digest('hex');
+	ok(init && init[2].em === sha('jane@example.com'), 'signed-in visitor: the first init carries the hashed account email');
+	ok(s.fbq.filter(c => c[0] === 'init').length === 1, 'the pixel is initialised exactly once (Meta ignores later inits)');
+	ok(/_dxps_ud=em\.e{64}/.test(s.cookie), 'matching fields from the server are kept for the next page: ' + s.cookie);
 	const vc = s.fbq.find(c => c[2] === 'ViewContent');
 	ok(vc && vc[3].num_items === 1 && vc[3].content_ids[0] === '101' && vc[4].eventID === relays[0].events[1].event_id, 'browser and server copies share the event ID');
 	const conv = calls.find(c => c[0] === 'event' && c[1] === 'conversion');
@@ -56,6 +60,39 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 	ok(!calls.some(c => c[0] === 'event' && c[1] === 'purchase' && c[2].send_to === 'G-TEST'), 'status-mode purchase is not duplicated to GA4 from the browser');
 	const gi = calls.find(c => c[0] === 'event' && c[1] === 'view_item' && c[2].send_to === 'G-TEST');
 	ok(gi && gi[2].items[0].item_variant === 'Smeđa', 'GA4 items carry the variant');
+
+	/* ---- 2.3.0: guest on a cached page: form fill -> cookie -> next page's first init ---- */
+	const ctx2 = await browser.newContext();
+	const g = await ctx2.newPage();
+	await g.route('**/*', route => {
+		const u = route.request().url();
+		if (u.includes('/wp-json/')) return route.fulfill({ contentType: 'application/json', body: '{"ok":true}' });
+		if (u.endsWith('/jquery-stub.js')) return route.fulfill({ contentType: 'text/javascript', body: jq });
+		if (u.endsWith('/dxps-front.js')) return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(__dirname, '../assets/js/dxps-front.js'), 'utf8') });
+		if (u.startsWith('https://shop.test/kontakt/')) return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(__dirname, '.page-guest.html'), 'utf8') });
+		return route.abort();
+	});
+	const gErrors = []; g.on('pageerror', e => gErrors.push(e.message));
+	await g.goto('https://shop.test/kontakt/'); // SHA-256 in the browser (crypto.subtle) needs HTTPS, as on the live site
+	let gs = await g.evaluate(() => ({ init: (window.fbq.queue || []).map(a => Array.from(a)).find(c => c[0] === 'init') }));
+	ok(gs.init && Object.keys(gs.init[2]).join() === 'external_id', 'new guest: first init has the browser ID only');
+	await g.fill('#f-name', 'Amra Hadžić Kovač');
+	await g.fill('[name=your-email]', 'Amra.H@Example.com');
+	await g.fill('#f-tel', '061 123 456');
+	await g.fill('[name=your-subject]', 'Termin');
+	await g.fill('[name=password]', 'secret');
+	await g.evaluate(() => { document.querySelectorAll('input').forEach(i => i.dispatchEvent(new Event('change', { bubbles: true }))); });
+	await g.waitForTimeout(1500);
+	const ud = await g.evaluate(() => (document.cookie.match(/_dxps_ud=([^;]*)/) || [])[1] || '');
+	const got = Object.fromEntries(ud.split('~').filter(Boolean).map(p => p.split('.')));
+	ok(got.em === sha('amra.h@example.com') && got.ph === sha('38761123456') && got.fn === sha('amra') && got.ln === sha('hadžićkovač'), 'form fill stores hashed email, phone (store country added), first and last name from a full-name field: ' + Object.keys(got).join());
+	ok(!/secret|termin|amra/i.test(ud), 'nothing readable in the cookie; password and subject ignored');
+	await g.goto('https://shop.test/kontakt/'); // SHA-256 in the browser (crypto.subtle) needs HTTPS, as on the live site
+	gs = await g.evaluate(() => ({ inits: (window.fbq.queue || []).map(a => Array.from(a)).filter(c => c[0] === 'init') }));
+	ok(got.em && gs.inits.length === 1 && gs.inits[0][2].em === got.em && gs.inits[0][2].ph === got.ph && gs.inits[0][2].fn === got.fn && gs.inits[0][2].external_id, 'returning guest on a cached page: the first init carries the hashed form data');
+	await g.evaluate(() => window.dxpsConsent('denied'));
+	ok(!(await g.evaluate(() => document.cookie)).includes('_dxps_ud='), 'consent withdrawal deletes the matching cookie');
+	ok(gErrors.length === 0, 'no script errors on the guest page ' + gErrors.join(' | '));
 	await browser.close();
 	console.log(fail ? `\n${fail} FAILED` : '\nAll browser checks passed');
 	process.exit(fail ? 1 : 0);
