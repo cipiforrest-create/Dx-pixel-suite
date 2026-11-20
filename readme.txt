@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.8.1
-Stable tag: 1.8.1
+Version: 2.1.0
+Stable tag: 2.3.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,45 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 2.3.0 =
+* Meta Event Match Quality. Customer data now reaches the pixel: Meta uses only the first fbq('init') of a pixel and ignored the re-inits DX used for form data and server-held data. The first init now carries the visitor's hashed email, phone, name and address together with the browser ID.
+* New first-party cookie _dxps_ud keeps a visitor's hashed matching fields (SHA-256 only) for the "Remember matching data" period, so returning visitors and cached pages are matched. Deleted on consent withdrawal.
+* Server relay keeps the customer's identity: signed-in customers are recognised even when the page's REST nonce has expired, and guests' checkout billing is read from their WooCommerce session.
+* Correct visitor IP behind Cloudflare and local proxies (was the proxy's address unless the host restored it). Forwarding headers are trusted only when the request really came through a proxy.
+* Wider form detection: autocomplete and label text, full-name fields split into first and last name (CF7 your-name, "Ime i prezime"), WPForms, Gravity Forms and Elementor name fields, email and phone inputs outside forms.
+* Login and sign-up events send the account's names, phone and address, not only the email.
+* Phone country falls back to the site language when WooCommerce is not active.
+* Defaults: remember matching data 90 days, all forms, phone default country, browser ID fallback and country fill-in are switched on (existing sites once, on update; hand-set values stay).
+* Diagnostics: shows how the visitor IP is resolved; coverage table includes state.
+
+= 2.2.0 =
+* Fixed GA4 attribution: campaign and click-ID parameters (utm_*, gclid, gbraid, wbraid, msclkid) stay in the page address sent to GA4. All other URL parameters are still removed.
+* Meta Conversions API now uses Graph API v25.0 (v21.0 is no longer available).
+* Server relay sends events in batches: one request and one Conversions API call per burst, with far fewer database writes. Expired REST nonces on cached pages no longer drop events for logged-in customers.
+* Better Meta match quality: the browser ID is set before the first PageView, 64-character browser IDs match between pixel and server, and the pixel receives the visitor's hashed matching fields the server already holds.
+* Google Ads: purchase conversions carry cart data (optional Merchant Center ID), optional dynamic remarketing events. GA4: User-ID in the browser, item brand/category/variant, discount, and location for server-side purchases.
+* More click IDs captured (gbraid, wbraid, msclkid, ttclid) with first- and last-touch saved on the order.
+* Feeds: Meta backorders published as "available for order", backorder policy for undated backorders, description fallback instead of exclusion, real category paths in product_type, localised colour/size attribute names, automatic custom labels, Meta stock quantity, tracking parameters for product links.
+* Feeds rebuild at the next hourly check after a price, sale or stock change instead of waiting for the full schedule.
+* See UPGRADE-2.2.md.
+
+= 2.1.0 =
+* Expanded feed editor: automatic local policy/shipping discovery, shipping rows, Google return labels, visual mappings, category suggestions and product previews.
+* Added content/price filters and actionable diagnostics; fixed description word boundaries.
+* Added protected in-page build progress and preserved existing feed URLs.
+* See UPGRADE-2.1.md for setup and platform-validation limits.
+
+= 2.0.0 =
+* Product Feeds tab: Google, Meta, Pinterest, Microsoft and Generic profiles; XML, CSV, TSV and generic JSON.
+* Background batches, atomic publication, resumable checkpoints, product-level validation and reports.
+* Product and variation catalogue fields; shared tracking/feed IDs, sale prices, identifiers and attribute mappings.
+* Consistent consent defaults and withdrawal, Google/Meta normalization, trusted-IP handling.
+* Single Google event owner; consented page_view with redacted URLs; validated public relay.
+* Authorized thank-you order payloads, queued purchases, bounded retries and per-platform delivery markers.
+* Direct Google engine simplified; old inferred segments and DOM price scraping removed.
+* See UPGRADE-2.0.md for migration and limitations.
+
 
 = 1.8.1 =
 * Facebook Login ID is now also read from Nextend Social Login (its own database table), WooCommerce Social Login
