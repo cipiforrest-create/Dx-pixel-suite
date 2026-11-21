@@ -106,6 +106,33 @@
 	}, 2500);
 
 	if (!getCookie('_dxps_lp')) setCookie('_dxps_lp', encodeURIComponent(safeUrl(location.href).slice(0, 300)), 90);
+
+	/* 2.3.1: the visitor's IPv6 address for server events. Meta prefers IPv6 and flags server events that carry
+	   IPv4 while the pixel sees IPv6; a site reached over IPv4 can never see the IPv6 address itself, so the browser
+	   asks an IPv6-capable "what is my IP" service once a day (after consent) and keeps the answer in _dxps_ip.
+	   Only IPv6 answers are kept; _dxps_ipc stops repeated lookups for visitors without IPv6. */
+	if (cfg.ip6Url && window.fetch && !getCookie('_dxps_ip') && !getCookie('_dxps_ipc')) {
+		setCookie('_dxps_ipc', '1', 1);
+		fetch(cfg.ip6Url, { credentials: 'omit', cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; }).then(function (t) {
+			t = String(t || '').trim();
+			if (allowed() && t.length <= 45 && t.indexOf(':') > -1 && /^[0-9a-f:.]+$/i.test(t)) setCookie('_dxps_ip', encodeURIComponent(t), 1);
+		}).catch(function () {});
+	}
+
+	/* 2.3.1: inside the Facebook / Instagram in-app browsers the ad click ID is often missing from the URL. Meta's own
+	   Parameter Builder can recover it there; it is loaded (pinned version) only in those browsers and only when no
+	   click ID is stored, so other visitors load nothing extra. */
+	if (cfg.paramBuilder && META_PIXEL && !getCookie('_fbc') && /FBAN|FBAV|FB_IAB|Instagram/i.test(navigator.userAgent || '')) {
+		var pbUrls = ['https://cdn.jsdelivr.net/npm/meta-capi-param-builder-clientjs@1.3.3/dist/clientParamBuilder.bundle.js', 'https://unpkg.com/meta-capi-param-builder-clientjs@1.3.3/dist/clientParamBuilder.bundle.js'];
+		var pbLoad = function (i) {
+			if (i >= pbUrls.length || !allowed()) return;
+			var sc = document.createElement('script'); sc.async = true; sc.src = pbUrls[i];
+			sc.onload = function () { try { if (allowed() && window.clientParamBuilder && clientParamBuilder.processAndCollectAllParams) clientParamBuilder.processAndCollectAllParams(location.href); } catch (e) {} };
+			sc.onerror = function () { pbLoad(i + 1); };
+			document.head.appendChild(sc);
+		};
+		pbLoad(0);
+	}
 	};
 	window.dxpsInitIdentity();
 	var googlePageSent=false;

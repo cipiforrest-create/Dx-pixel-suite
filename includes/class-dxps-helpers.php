@@ -513,11 +513,23 @@ class DXPS_Helpers {
 	public static function fbc() {
 		$v = isset( $_COOKIE['_fbc'] ) && is_string( $_COOKIE['_fbc'] ) ? $_COOKIE['_fbc'] : '';
 		// A new ad click (a different fbclid) replaces the stored click ID - Meta attributes to the latest click.
-		if ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $_GET['fbclid'] ) ) {
-			$suffix = '.' . $_GET['fbclid'];
+		$click = ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) ) ? $_GET['fbclid'] : self::referrer_fbclid();
+		if ( $click && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $click ) ) {
+			$suffix = '.' . $click;
 			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.1.' . round( microtime( true ) * 1000 ) . $suffix;
 		}
 		return self::valid_user_data( array( 'fbc'=>$v ) )['fbc'] ?? '';
+	}
+
+	/**
+	 * 2.3.1: the ad click ID from the previous page of this site (Referer), for visits where the landing page could
+	 * not store it (consent given on the second page, or a script redirect that dropped the query string).
+	 */
+	public static function referrer_fbclid() {
+		$ref = isset( $_SERVER['HTTP_REFERER'] ) && is_string( $_SERVER['HTTP_REFERER'] ) ? $_SERVER['HTTP_REFERER'] : '';
+		if ( '' === $ref || ! self::same_site_origin( $ref ) ) return '';
+		parse_str( (string) wp_parse_url( $ref, PHP_URL_QUERY ), $q );
+		return isset( $q['fbclid'] ) && is_string( $q['fbclid'] ) ? $q['fbclid'] : '';
 	}
 
 	public static function ga_client_id() {
@@ -863,9 +875,23 @@ class DXPS_Helpers {
 				if ( $found ) $ip = $found;
 			}
 		}
+		// 2.3.1: the browser's own IPv6 address (looked up by the browser after consent, cookie _dxps_ip), used only
+		// when this connection is IPv4: Meta prefers IPv6 and compares it with what the pixel sees. A visitor can only
+		// change the address on their own events, so the value is checked for format, never trusted for anything else.
+		if ( $ip && filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 ) && self::on( 'ip6_lookup' ) && self::marketing_allowed() ) {
+			$v6 = self::browser_ipv6();
+			if ( $v6 ) $ip = $v6;
+		}
 		// A proxy integration can still override the result explicitly.
 		$ip = apply_filters( 'dxps_client_ip', $ip );
 		return is_string( $ip ) && filter_var( $ip, FILTER_VALIDATE_IP ) ? $ip : '';
+	}
+
+	/** The visitor's public IPv6 address from the _dxps_ip cookie (written by the browser), or ''. */
+	public static function browser_ipv6() {
+		$v = isset( $_COOKIE['_dxps_ip'] ) && is_string( $_COOKIE['_dxps_ip'] ) ? trim( rawurldecode( $_COOKIE['_dxps_ip'] ) ) : '';
+		if ( '' === $v || strlen( $v ) > 45 || ! filter_var( $v, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6 ) ) return '';
+		return self::public_ip( $v );
 	}
 
 	/** The address if it is a valid public (not private / reserved) IP, else ''. */
@@ -892,6 +918,50 @@ class DXPS_Helpers {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * 2.3.1: whether a request Origin / Referer belongs to this site. www and the bare domain count as one site, and
+	 * an https site also accepts its own http pages; any other host, or a different port, does not.
+	 */
+	public static function same_site_origin( $origin ) {
+		$src = wp_parse_url( (string) $origin );
+		$dst = wp_parse_url( home_url() );
+		if ( ! is_array( $src ) || empty( $src['host'] ) || ! is_array( $dst ) || empty( $dst['host'] ) ) return false;
+		$bare = function ( $h ) { return preg_replace( '/^www\./', '', strtolower( (string) $h ) ); };
+		if ( $bare( $src['host'] ) !== $bare( $dst['host'] ) ) return false;
+		$s_scheme = strtolower( $src['scheme'] ?? '' ); $d_scheme = strtolower( $dst['scheme'] ?? '' );
+		if ( ! in_array( $s_scheme, array( 'http', 'https' ), true ) ) return false;
+		if ( $s_scheme !== $d_scheme && ! ( 'https' === $d_scheme && 'http' === $s_scheme ) ) return false;
+		if ( $s_scheme !== $d_scheme ) return ! isset( $src['port'] ) && ! isset( $dst['port'] ); // http page of an https site, default ports only
+		$port = function ( $u, $scheme ) { return (int) ( $u['port'] ?? ( 'https' === $scheme ? 443 : 80 ) ); };
+		return $port( $src, $s_scheme ) === $port( $dst, $d_scheme );
+	}
+
+	/**
+	 * 2.3.1: relay delivery counters for Diagnostics (today and the previous days, 14 days kept). Reasons a request
+	 * was refused (origin, rate, bot, size, consent, sensitive), plus sent / meta_error. Counts only, never visitor data.
+	 * Successful sends are counted only while the event log is on, so normal traffic adds no database write.
+	 */
+	public static function count_relay( $reason, $n = 1 ) {
+		if ( 0 === strpos( (string) $reason, 'sent' ) && ! self::on( 'event_log' ) ) return;
+		$stats = get_option( 'dxps_relay_stats', array() );
+		if ( ! is_array( $stats ) ) $stats = array();
+		$day = gmdate( 'Y-m-d' );
+		if ( (int) ( $stats[ $day ][ $reason ] ?? 0 ) >= 10000 ) return; // bounded: a flood cannot keep writing
+		$stats[ $day ][ $reason ] = (int) ( $stats[ $day ][ $reason ] ?? 0 ) + max( 1, (int) $n );
+		ksort( $stats );
+		update_option( 'dxps_relay_stats', array_slice( $stats, -14, null, true ), false );
+	}
+
+	/** Relay counters summed over the last $days days. */
+	public static function relay_stats( $days = 7 ) {
+		$stats = get_option( 'dxps_relay_stats', array() );
+		$out = array();
+		foreach ( is_array( $stats ) ? array_slice( $stats, -$days, null, true ) : array() as $row ) {
+			foreach ( (array) $row as $k => $v ) $out[ $k ] = ( $out[ $k ] ?? 0 ) + (int) $v;
+		}
+		return $out;
 	}
 
 	/** Diagnostics: how the visitor IP is being resolved on this server. */

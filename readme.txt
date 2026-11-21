@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
 Version: 2.1.0
-Stable tag: 2.3.0
+Stable tag: 2.3.1
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,13 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 2.3.1 =
+* Browser ID (fbp) on every server event: _fbp is created before the pixel starts, so a new visitor's first server events carry it (Meta reported about 86%).
+* More server events reach Meta: www and bare domain (and an https site's own http pages) count as the same site for the relay; the rate limit is per browser, so visitors sharing a mobile-carrier or proxy address are no longer throttled together.
+* Diagnostics: relay refusals counted by reason (wrong address, rate limit, bots, consent, health pages, Meta errors) for the last 7 days.
+* IPv6 for server events: after consent the browser looks up its own IPv6 address once a day (default api64.ipify.org, configurable) and server events use it when the site is reached over IPv4. Setting "Visitor IPv6", on by default.
+* Click ID (fbc): recovered from the previous page of the site when the landing page could not store it, and inside the Facebook / Instagram in-app browsers through Meta's official Parameter Builder (setting "In-app click ID", on by default).
 
 = 2.3.0 =
 * Meta Event Match Quality. Customer data now reaches the pixel: Meta uses only the first fbq('init') of a pixel and ignored the re-inits DX used for form data and server-held data. The first init now carries the visitor's hashed email, phone, name and address together with the browser ID.

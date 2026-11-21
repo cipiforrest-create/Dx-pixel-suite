@@ -138,8 +138,47 @@ settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '1
 $res = DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'scroll', 'x.4' ) ) ), $h ) );
 ok( $n === count( $GLOBALS['t']['http'] ) && 'disabled_or_consent' === $res->data['skipped'], 'no consent, no relay' );
 
+/* ---------------- 2.3.1: relay acceptance, counters, IPv6, click ID from the referrer ---------------- */
+echo "Diagnostics fixes (2.3.1)\n";
+ok( DXPS_Helpers::same_site_origin( 'http://www.shop.test/page/' ) && DXPS_Helpers::same_site_origin( 'http://shop.test' ), 'www and bare domain are the same site' );
+ok( ! DXPS_Helpers::same_site_origin( 'http://evil.test' ) && ! DXPS_Helpers::same_site_origin( 'http://shop.test.evil.test' ) && ! DXPS_Helpers::same_site_origin( 'http://shop.test:8080' ) && ! DXPS_Helpers::same_site_origin( 'https://shop.test' ) && ! DXPS_Helpers::same_site_origin( 'javascript:alert(1)' ), 'other hosts, ports and schemes are refused' );
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'meta_capi_token' => 'tok', 'auto_am' => 1, 'consent_mode' => 0 ) );
+$GLOBALS['t']['options']['dxps_relay_stats'] = array(); $GLOBALS['t']['transients'] = array();
+$_COOKIE = array( 'pbid' => str_repeat( 'ab', 16 ) ); $_SERVER['REMOTE_ADDR'] = '89.146.10.30';
+$n0 = count( $GLOBALS['t']['http'] );
+$res = DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'scroll', 'w.1', array( 'percent_scrolled' => 25 ) ) ) ), array( 'origin' => 'http://www.shop.test' ) ) );
+ok( 200 === $res->status && count( $GLOBALS['t']['http'] ) === $n0 + 1, 'relay from the www address is delivered (was refused before)' );
+DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'scroll', 'w.2' ) ) ), array( 'origin' => 'http://evil.test' ) ) );
+ok( 1 === ( DXPS_Helpers::relay_stats()['origin'] ?? 0 ), 'refused requests are counted by reason' );
+$GLOBALS['t']['transients'][ 'dxps_rl_' . md5( str_repeat( 'ab', 16 ) . '|89.146.10.30|' . floor( time() / 60 ) ) ] = 240;
+ok( 403 === DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'scroll', 'w.3' ) ) ), $h ) )->status && 1 === ( DXPS_Helpers::relay_stats()['rate'] ?? 0 ), 'a browser over its rate limit is refused and counted' );
+$_COOKIE['pbid'] = str_repeat( 'cd', 16 );
+ok( 200 === DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'scroll', 'w.4' ) ) ), $h ) )->status, 'another browser on the same IP address is not throttled' );
+
+settings( array( 'ip6_lookup' => 1, 'consent_mode' => 0 ) );
+$srv = $_SERVER; $_SERVER['REMOTE_ADDR'] = '89.146.10.30';
+$_COOKIE = array( '_dxps_ip' => rawurlencode( '2a02:810d:4b00:1::77' ) );
+ok( '2a02:810d:4b00:1::77' === DXPS_Helpers::client_ip(), 'IPv4 connection: the browser-reported IPv6 address is sent' );
+foreach ( array( 'fd00::1', '::1', '89.146.10.99', '2a02:zz::1', str_repeat( 'a', 60 ) ) as $bad ) {
+	$_COOKIE['_dxps_ip'] = $bad;
+	ok( '89.146.10.30' === DXPS_Helpers::client_ip(), 'ignored browser IP value: ' . substr( $bad, 0, 20 ) );
+}
+$_COOKIE['_dxps_ip'] = '2a02:810d:4b00:1::77'; $_SERVER['REMOTE_ADDR'] = '2a02:810d:4b00:1::88';
+ok( '2a02:810d:4b00:1::88' === DXPS_Helpers::client_ip(), 'an IPv6 connection keeps its own address' );
+settings( array( 'ip6_lookup' => 0 ) ); $_SERVER['REMOTE_ADDR'] = '89.146.10.30';
+ok( '89.146.10.30' === DXPS_Helpers::client_ip(), 'setting off: browser IP value not used' );
+settings( array( 'ip6_lookup' => 1, 'consent_mode' => 1 ) );
+ok( '89.146.10.30' === DXPS_Helpers::client_ip(), 'no consent: browser IP value not used' );
+
+settings( array() ); $_COOKIE = array(); unset( $_GET['fbclid'] );
+$_SERVER['HTTP_REFERER'] = 'http://www.shop.test/landing/?utm_source=fb&fbclid=RefClick12345';
+ok( 1 === preg_match( '/^fb\.1\.\d{13}\.RefClick12345$/', DXPS_Helpers::fbc() ), 'click ID recovered from the previous page of this site' );
+$_SERVER['HTTP_REFERER'] = 'http://evil.test/?fbclid=Forged12345';
+ok( '' === DXPS_Helpers::fbc(), 'click ID from a foreign referrer is ignored' );
+$_SERVER = $srv;
+
 /* ---------------- rendered page (consumed by tests/browser.js) ---------------- */
-settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'ga4_enabled' => 1, 'ga4_id' => 'G-TEST', 'gads_enabled' => 1, 'gads_conversion_id' => 'AW-1', 'gads_purchase_label' => 'lbl', 'gads_merchant_id' => '5551234', 'gads_feed_country' => 'ba', 'gads_remarketing' => 1, 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1 ) );
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'ga4_enabled' => 1, 'ga4_id' => 'G-TEST', 'gads_enabled' => 1, 'gads_conversion_id' => 'AW-1', 'gads_purchase_label' => 'lbl', 'gads_merchant_id' => '5551234', 'gads_feed_country' => 'ba', 'gads_remarketing' => 1, 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'fbp_fallback' => 1 ) );
 $_SERVER['REQUEST_URI'] = '/product/1/';
 ob_start(); DXPS_Tracking::head_output(); $head = ob_get_clean();
 ok( false !== strpos( $head, 'dxpsPageUrl' ) && false !== strpos( $head, '"adsMerchant":{"id":5551234,"country":"BA"}' ) && false !== strpos( $head, '"uid":"u7"' ), 'head output carries the new configuration' );
@@ -148,7 +187,7 @@ ok( false !== strpos( $head, hash( 'sha256', 'jane@example.com' ) ) && false !==
 ok( false !== strpos( $head, '"udTtl":' ), 'cookie lifetime handed to the browser' );
 // Guest page (what a page cache would serve): no customer data in the HTML, the browser cookie supplies it.
 $GLOBALS['t']['user'] = 0; $_COOKIE = array();
-settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'am_all_forms' => 1, 'phone_default_country' => 1, 'am_retention_days' => 90 ) );
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'am_all_forms' => 1, 'phone_default_country' => 1, 'am_retention_days' => 90, 'fbp_fallback' => 1, 'ip6_lookup' => 1, 'ip6_url' => 'https://api64.ipify.org' ) );
 $GLOBALS['t']['locale'] = 'bs_BA'; // site language decides the phone country without WooCommerce
 ob_start(); DXPS_Tracking::head_output(); $guest = ob_get_clean();
 ok( false !== strpos( $guest, '"baseCountry":"ba"' ), 'phone country from the site language reaches the browser' );

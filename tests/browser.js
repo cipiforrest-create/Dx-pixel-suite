@@ -10,10 +10,11 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 (async () => {
 	const browser = await chromium.launch();
 	const page = await browser.newPage();
-	const relays = [];
+	const relays = [], relayCookies = []; let ip6Calls = 0;
 	await page.route('**/*', route => {
 		const u = route.request().url();
-		if (u.includes('/wp-json/dxps/v1/e')) { relays.push(JSON.parse(route.request().postData())); return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, am: { em: 'e'.repeat(64) } }) }); }
+		if (u.includes('api64.ipify.org')) { ip6Calls++; return route.fulfill({ contentType: 'text/plain', body: '2a02:810d:4b00:1::77' }); }
+		if (u.includes('/wp-json/dxps/v1/e')) { relays.push(JSON.parse(route.request().postData())); relayCookies.push(route.request().headers()['cookie'] || ''); return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, am: { em: 'e'.repeat(64) } }) }); }
 		if (u.includes('/wp-json/')) return route.fulfill({ contentType: 'application/json', body: '{"ok":true}' });
 		if (u.endsWith('/jquery-stub.js')) return route.fulfill({ contentType: 'text/javascript', body: jq });
 		if (u.endsWith('/dxps-front.js')) return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(__dirname, '../assets/js/dxps-front.js'), 'utf8') });
@@ -44,6 +45,8 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 	const init = s.fbq.find(c => c[0] === 'init');
 	ok(init && init[2] && /^[a-f0-9]{32}$/.test(init[2].external_id) && s.cookie.includes('pbid=' + init[2].external_id), 'first pixel init carries the browser ID');
 	ok(s.fbq.findIndex(c => c[0] === 'init') < s.fbq.findIndex(c => c[2] === 'PageView'), 'browser ID is set before the PageView');
+	ok(/_fbp=fb\.1\.\d{13}\.\d{10}/.test(s.cookie) && /_fbp=fb\.1\./.test(relayCookies[0] || ''), 'new visitor: _fbp exists before Meta loads, so the first server copy carries it');
+	ok(ip6Calls === 0, 'IPv6 lookup off: no outside request');
 	ok(/_dxps_lt=/.test(s.cookie) && /_dxps_src=/.test(s.cookie) && /_fbc=fb\.1\.\d+\.IwAR0abcdef/.test(s.cookie), 'first-touch, last-touch and click-ID cookies');
 	ok(relays.length === 1 && relays[0].events.map(e => e.name).join() === 'page_view,view_item,add_to_cart', 'one relay request for the burst, purchase excluded: ' + relays.map(r => r.events.map(e => e.name).join()).join(' / '));
 	ok(relays[0] && !Object.keys(relays[0].events[2].params).some(k => k[0] === '_') && relays[0].events[1].url === 'http://shop.test/product/1/', 'internal fields and query strings stay out of the relay');
@@ -63,9 +66,10 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 
 	/* ---- 2.3.0: guest on a cached page: form fill -> cookie -> next page's first init ---- */
 	const ctx2 = await browser.newContext();
-	const g = await ctx2.newPage();
+	const g = await ctx2.newPage(); let gIp6 = 0;
 	await g.route('**/*', route => {
 		const u = route.request().url();
+		if (u.includes('api64.ipify.org')) { gIp6++; return route.fulfill({ contentType: 'text/plain', headers: { 'access-control-allow-origin': '*' }, body: '2a02:810d:4b00:1::77' }); }
 		if (u.includes('/wp-json/')) return route.fulfill({ contentType: 'application/json', body: '{"ok":true}' });
 		if (u.endsWith('/jquery-stub.js')) return route.fulfill({ contentType: 'text/javascript', body: jq });
 		if (u.endsWith('/dxps-front.js')) return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(__dirname, '../assets/js/dxps-front.js'), 'utf8') });
@@ -90,8 +94,12 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 	await g.goto('https://shop.test/kontakt/'); // SHA-256 in the browser (crypto.subtle) needs HTTPS, as on the live site
 	gs = await g.evaluate(() => ({ inits: (window.fbq.queue || []).map(a => Array.from(a)).filter(c => c[0] === 'init') }));
 	ok(got.em && gs.inits.length === 1 && gs.inits[0][2].em === got.em && gs.inits[0][2].ph === got.ph && gs.inits[0][2].fn === got.fn && gs.inits[0][2].external_id, 'returning guest on a cached page: the first init carries the hashed form data');
+	ok(gIp6 === 1 && decodeURIComponent((await g.evaluate(() => (document.cookie.match(/_dxps_ip=([^;]*)/) || [])[1] || ''))) === '2a02:810d:4b00:1::77', 'IPv6 lookup: one request, address kept for server events (' + gIp6 + ' calls)');
+	await g.goto('https://shop.test/kontakt/', { referer: 'https://shop.test/kontakt/?fbclid=RefClick12345' });
+	ok(/_fbc=fb\.1\.\d{13}\.RefClick12345/.test(await g.evaluate(() => document.cookie)), 'click ID recovered from the previous page when the landing page lost it');
 	await g.evaluate(() => window.dxpsConsent('denied'));
-	ok(!(await g.evaluate(() => document.cookie)).includes('_dxps_ud='), 'consent withdrawal deletes the matching cookie');
+	const afterDeny = await g.evaluate(() => document.cookie);
+	ok(!afterDeny.includes('_dxps_ud=') && !afterDeny.includes('_dxps_ip='), 'consent withdrawal deletes the matching and IP cookies');
 	ok(gErrors.length === 0, 'no script errors on the guest page ' + gErrors.join(' | '));
 	await browser.close();
 	console.log(fail ? `\n${fail} FAILED` : '\nAll browser checks passed');

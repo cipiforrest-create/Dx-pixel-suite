@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: WooCommerce and content tracking with Meta Pixel/CAPI, GA4, Google Ads, consent controls and scheduled product catalogues for Google, Meta, Pinterest and Microsoft.
- * Version:     2.3.0
+ * Version:     2.3.1
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '2.3.0' );
+define( 'DXPS_VERSION', '2.3.1' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -101,6 +101,10 @@ register_activation_hook( __FILE__, function () {
 		'gads_feed_language'    => '',
 		'gads_remarketing'      => 0,       // Google Ads dynamic remarketing events (opt-in)
 		'ga4_page_titles'       => 0,       // send the real browser title to GA4 (opt-in)
+		// 2.3.1
+		'ip6_lookup'            => 1,       // browser looks up its IPv6 address after consent (Meta prefers IPv6)
+		'ip6_url'               => 'https://api64.ipify.org',
+		'param_builder'         => 1,       // Meta Parameter Builder in Facebook / Instagram in-app browsers
 	);
 	$existing = get_option( 'dxps_settings', array() );
 	update_option( 'dxps_settings', array_merge( $defaults, (array) $existing ) );
@@ -135,6 +139,14 @@ add_action( 'plugins_loaded', function () {
 				if ( empty( $o['geo_enrich'] ) ) $o['geo_enrich'] = 'country';
 				$changed = true;
 				update_option( 'dxps_emq_230', time(), false );
+			}
+			// 2.3.1 (once): IPv6 lookup and Meta's Parameter Builder in in-app browsers, both after consent.
+			if ( version_compare( (string) get_option( 'dxps_version', '0' ), '2.3.1', '<' ) && ! get_option( 'dxps_emq_231' ) ) {
+				if ( ! array_key_exists( 'ip6_lookup', $o ) ) $o['ip6_lookup'] = 1;
+				if ( ! array_key_exists( 'param_builder', $o ) ) $o['param_builder'] = 1;
+				if ( empty( $o['ip6_url'] ) ) $o['ip6_url'] = 'https://api64.ipify.org';
+				$changed = true;
+				update_option( 'dxps_emq_231', time(), false );
 			}
 			if ( $changed ) update_option( 'dxps_settings', $o );
 		}

@@ -96,19 +96,33 @@ class DXPS_Server {
 
 	/** Same-origin + rate-limit guard shared by both public endpoints. */
 	private static function guard( WP_REST_Request $req ) {
-		if ( strlen( $req->get_body() ) > 65536 || DXPS_Helpers::excluded_role() ) return false;
+		if ( strlen( $req->get_body() ) > 65536 ) return self::reject( 'size' );
+		if ( DXPS_Helpers::excluded_role() ) return false; // staff traffic: intentionally dropped, not a delivery problem
 		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
-		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
-		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
-		$source = wp_parse_url( $origin ); $target = wp_parse_url( home_url() );
-		if ( ! $host || strtolower( $host ) !== strtolower( $site ) || ( $source['scheme'] ?? '' ) !== ( $target['scheme'] ?? '' ) || (int) ( $source['port'] ?? ( 'https' === ( $source['scheme'] ?? '' ) ? 443 : 80 ) ) !== (int) ( $target['port'] ?? ( 'https' === ( $target['scheme'] ?? '' ) ? 443 : 80 ) ) ) return false;
-		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) return false;
+		// 2.3.1: www and bare domain are one site, and an https site also accepts its own http pages (a visitor on a
+		// non-canonical address used to have every relay rejected). Any other host, or another port, is still refused.
+		if ( ! DXPS_Helpers::same_site_origin( $origin ) ) return self::reject( 'origin' );
+		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) return self::reject( 'bot' );
+		// 2.3.1: rate limit per browser (pbid + IP), so many visitors behind one carrier / proxy address are not
+		// throttled together. Requests without a browser ID share one bucket per IP address. One write per request.
 		$ip   = self::ip();
-		$key = 'dxps_rl_' . md5( $ip . '|' . floor( time() / 60 ) );
+		$pbid = isset( $_COOKIE['pbid'] ) && is_string( $_COOKIE['pbid'] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE['pbid'] ) ? strtolower( $_COOKIE['pbid'] ) : '';
+		$key  = 'dxps_rl_' . md5( $pbid . '|' . $ip . '|' . floor( time() / 60 ) );
 		$rate = (int) get_transient( $key );
-		if ( $rate >= 120 ) return false;
+		$limit = $pbid ? 240 : 120;
+		if ( $rate >= $limit ) {
+			// Counted once per browser and minute (not once per refused request), so a flood adds no database writes.
+			if ( $rate === $limit ) { set_transient( $key, $limit + 1, 2 * MINUTE_IN_SECONDS ); self::reject( 'rate' ); }
+			return false;
+		}
 		set_transient( $key, $rate + 1, 2 * MINUTE_IN_SECONDS );
 		return true;
+	}
+
+	/** Count a refused relay request by reason (Diagnostics), then refuse it. */
+	private static function reject( $reason ) {
+		DXPS_Helpers::count_relay( $reason );
+		return false;
 	}
 
 	/**
@@ -146,7 +160,7 @@ class DXPS_Server {
 
 	public static function relay( WP_REST_Request $req ) {
 		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok'=>false ), 403 );
-		if ( ! DXPS_Helpers::on( 'server_relay' ) || ! DXPS_Helpers::marketing_allowed() ) return new WP_REST_Response( array( 'ok'=>true,'skipped'=>'disabled_or_consent' ) );
+		if ( ! DXPS_Helpers::on( 'server_relay' ) || ! DXPS_Helpers::marketing_allowed() ) { DXPS_Helpers::count_relay( 'consent' ); return new WP_REST_Response( array( 'ok'=>true,'skipped'=>'disabled_or_consent' ) ); }
 
 		// 2.2.0: the browser sends its events in small batches ({events:[...]}); one request, one Conversions API call.
 		// A single event object (the pre-2.2 shape, still used by cached pages) is accepted as a batch of one.
@@ -166,7 +180,7 @@ class DXPS_Server {
 			$name = sanitize_text_field( $e['name'] ); $event_id = sanitize_text_field( $e['event_id'] );
 			if ( in_array( $name, $server_owned, true ) ) { $skipped[] = 'server_owned'; continue; }
 			if ( ! in_array( $name, $allowed, true ) || ! preg_match( '/^[A-Za-z0-9_.:-]{1,100}$/', $event_id ) ) return new WP_REST_Response( array( 'ok'=>false ), 400 );
-			if ( DXPS_Helpers::sensitive_context( $e['url'], $e['params'] ) || DXPS_Helpers::sensitive_context( $name ) ) { $skipped[] = 'sensitive_context'; continue; }
+			if ( DXPS_Helpers::sensitive_context( $e['url'], $e['params'] ) || DXPS_Helpers::sensitive_context( $name ) ) { $skipped[] = 'sensitive_context'; DXPS_Helpers::count_relay( 'sensitive' ); continue; }
 			$params = self::relay_params( $e['params'] );
 			if ( is_wp_error( $params ) ) return new WP_REST_Response( array( 'ok'=>false,'error'=>'invalid_parameters' ), 400 );
 			if ( ! $meta_ready ) { $skipped[] = 'disabled'; continue; }
@@ -189,6 +203,8 @@ class DXPS_Server {
 
 		// Meta deduplicates on event_name + event_id, so a repeated relay of the same event needs no local lock or marker.
 		$meta = $events ? self::meta_post( $events ) : array( 'ok'=>false, 'status'=>$skipped ? $skipped[0] : 'empty' );
+		if ( $events ) DXPS_Helpers::count_relay( ! empty( $meta['ok'] ) ? 'sent' : 'meta_error', count( $events ) );
+		if ( $events && ! empty( $meta['ok'] ) && false !== strpos( (string) ( $user['client_ip_address'] ?? '' ), ':' ) ) DXPS_Helpers::count_relay( 'sent_ipv6', count( $events ) );
 		if ( $events ) {
 			DXPS_Helpers::log( 'CAPI relay', $meta + array( 'events'=>$names, 'user_data_fields'=>array_keys( $user ) ) );
 			foreach ( $events as $i => $ev ) DXPS_Helpers::log_event( array( 'e'=>$names[ $i ], 'ok'=>$meta['ok'] ? 1 : 0, 's'=>$meta['status'], 'f'=>array_keys( $ev['user_data'] ), 'v'=>isset( $ev['custom_data']['value'] ) ? 1 : 0 ) );

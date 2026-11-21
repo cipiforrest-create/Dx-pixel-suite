@@ -55,7 +55,7 @@ class DXPS_Tracking {
 	 */
 	public static function capture_fbclid_early() {
 		if ( ! DXPS_Helpers::marketing_allowed() || DXPS_Helpers::sensitive_context( $_SERVER['REQUEST_URI'] ?? '/' ) ) return;
-		if ( empty( $_GET['fbclid'] ) || headers_sent() ) return;
+		if ( ( empty( $_GET['fbclid'] ) && '' === DXPS_Helpers::referrer_fbclid() ) || headers_sent() ) return;
 		$fbc = DXPS_Helpers::fbc(); // keeps the cookie for the same click, new value for a new ad click
 		if ( ! $fbc || ( isset( $_COOKIE['_fbc'] ) && $_COOKIE['_fbc'] === $fbc ) ) return;
 		// 400 days is the hard ceiling modern browsers (Chrome/Edge) enforce on Set-Cookie
@@ -177,7 +177,7 @@ if(typeof w.fbq==='function')w.fbq('consent',g?'grant':'revoke');
 if(g){if(w.dxpsInitIdentity)w.dxpsInitIdentity();if(w.dxpsInitMeta)w.dxpsInitMeta();}
 else{
  if(w.dxpsCfg&&w.dxpsCfg.forgetUrl)fetch(w.dxpsCfg.forgetUrl,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:'{}'}).catch(function(){});
- ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lt','_dxps_lp','_dxps_ud','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
+ ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lt','_dxps_lp','_dxps_ud','_dxps_ip','_dxps_ipc','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
  try{sessionStorage.removeItem('eh_customer_hashes');Object.keys(localStorage).forEach(function(k){if(k.indexOf('eh_')===0||k.indexOf('dxps_')===0)localStorage.removeItem(k)})}catch(e){}
  w.__ehHashedCustomerData=null;w.dxpsQ=[];gtag('set','user_data',null);
 }
@@ -211,9 +211,12 @@ DXPS_CONSENT_BRIDGE;
 			$px  = esc_js( $meta );
 			// 1.7.0 (opt-in): Meta Limited Data Use, geolocated by Meta (country 0, state 0).
 			$ldu = DXPS_Helpers::on( 'meta_ldu' ) ? "fbq('dataProcessingOptions',['LDU'],0,0);" : '';
+			// 2.3.1: _fbp is written before the pixel starts (Meta's own format; fbevents.js adopts it), so the very first
+			// server copy of a new visitor's events carries the browser ID instead of waiting for fbevents.js to load.
+			$fbp_js = DXPS_Helpers::on( 'fbp_fallback' ) ? 'true' : 'false';
 			echo "<script>
 window.dxpsMetaReady=false;
-window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}var x='';try{var m=document.cookie.match(/(?:^|;\\s*)pbid=([a-f0-9]{32,64})(?:;|$)/i);if(m)x=m[1].toLowerCase();else{var a=crypto.getRandomValues(new Uint8Array(16));for(var i=0;i<16;i++)x+=('0'+a[i].toString(16)).slice(-2);document.cookie='pbid='+x+';path=/;max-age=31536000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');}}catch(e){x=''}var am={$adv},c={};try{var u=document.cookie.match(/(?:^|;\\s*)_dxps_ud=([^;]*)/);if(u)u[1].split('~').forEach(function(p){var kv=p.split('.');if(kv.length===2&&/^(em|ph|fn|ln|ct|st|zp|country)$/.test(kv[0])&&/^[a-f0-9]{64}$/.test(kv[1]))c[kv[0]]=kv[1];});}catch(e){}if(am.em&&c.em&&am.em!==c.em)c={};Object.keys(c).forEach(function(k){if(!am[k])am[k]=c[k];});if(x)am.external_id=x;fbq('init','{$px}',am);var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
+window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}var x='';try{var m=document.cookie.match(/(?:^|;\\s*)pbid=([a-f0-9]{32,64})(?:;|$)/i);if(m)x=m[1].toLowerCase();else{var a=crypto.getRandomValues(new Uint8Array(16));for(var i=0;i<16;i++)x+=('0'+a[i].toString(16)).slice(-2);document.cookie='pbid='+x+';path=/;max-age=31536000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');}}catch(e){x=''}try{var ck=document.cookie,ex=';path=/;max-age=7776000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');if({$fbp_js}&&!/(?:^|;\\s*)_fbp=/.test(ck))document.cookie='_fbp=fb.1.'+Date.now()+'.'+(Math.floor(Math.random()*9e9)+1e9)+ex;var cl=null;try{cl=new URLSearchParams(location.search).get('fbclid');if(!cl&&document.referrer){var rf=new URL(document.referrer);if(rf.hostname.replace(/^www\\./,'')===location.hostname.replace(/^www\\./,''))cl=rf.searchParams.get('fbclid');}}catch(e){}if(cl&&/^[A-Za-z0-9_-]{6,400}$/.test(cl)){var cf=(ck.match(/(?:^|;\\s*)_fbc=([^;]*)/)||[])[1]||'';if(cf.slice(-(cl.length+1))!=='.'+cl)document.cookie='_fbc=fb.1.'+Date.now()+'.'+cl+ex;}}catch(e){}var am={$adv},c={};try{var u=document.cookie.match(/(?:^|;\\s*)_dxps_ud=([^;]*)/);if(u)u[1].split('~').forEach(function(p){var kv=p.split('.');if(kv.length===2&&/^(em|ph|fn|ln|ct|st|zp|country)$/.test(kv[0])&&/^[a-f0-9]{64}$/.test(kv[1]))c[kv[0]]=kv[1];});}catch(e){}if(am.em&&c.em&&am.em!==c.em)c={};Object.keys(c).forEach(function(k){if(!am[k])am[k]=c[k];});if(x)am.external_id=x;fbq('init','{$px}',am);var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
 </script>\n";
 			if ( DXPS_Helpers::marketing_allowed() ) {
 				echo "<script>window.dxpsInitMeta();</script>\n";
@@ -280,6 +283,9 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			// ---- 1.7.0 (all opt-in) ----
 			'amAll'       => DXPS_Helpers::on( 'am_all_forms' ) ? 1 : 0,
 			'udTtl'       => (int) DXPS_Helpers::retention(), // 2.3.0: lifetime of the hashed matching cookie, seconds
+			// 2.3.1: browser IPv6 lookup (after consent) and Meta's Parameter Builder in Facebook / Instagram in-app browsers.
+			'ip6Url'      => ( $meta && DXPS_Helpers::on( 'ip6_lookup' ) ) ? esc_url_raw( (string) DXPS_Helpers::opt( 'ip6_url', 'https://api64.ipify.org' ) ) : '',
+			'paramBuilder'=> ( $meta && DXPS_Helpers::on( 'param_builder' ) ) ? 1 : 0,
 			'urlIdentity' => DXPS_Helpers::on( 'auto_am' ) ? DXPS_Helpers::url_identity() : array(),
 			'baseCountry' => DXPS_Helpers::on( 'phone_default_country' ) ? strtolower( DXPS_Helpers::default_country() ) : '',
 			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,

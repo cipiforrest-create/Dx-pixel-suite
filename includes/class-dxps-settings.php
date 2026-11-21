@@ -13,8 +13,8 @@ class DXPS_Settings {
 			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu', 'gads_remarketing', 'ga4_page_titles' ),
 		),
 		'events' => array(
-			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich' ),
-			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged' ),
+			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich', 'ip6_url' ),
+			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged', 'ip6_lookup', 'param_builder' ),
 		),
 		'consent' => array(
 			'text' => array(),
@@ -74,6 +74,9 @@ class DXPS_Settings {
 			$o['content_read_scroll'] = max( 10, min( 100, absint( $o['content_read_scroll'] ?: 50 ) ) );
 			$o['content_read_time']   = max( 5, min( 600, absint( $o['content_read_time'] ?: 30 ) ) );
 			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full' ), true ) ? $o['geo_enrich'] : '';
+			// 2.3.1: IPv6 lookup service: an https address only; empty falls back to the default.
+			$ip6 = esc_url_raw( (string) ( $o['ip6_url'] ?? '' ), array( 'https' ) );
+			$o['ip6_url'] = $ip6 ? $ip6 : 'https://api64.ipify.org';
 		}
 		update_option( 'dxps_settings', $o );
 		// Post/Redirect/Get: DXPS_Helpers::opt() caches the options for the request, so rendering the form in
@@ -213,6 +216,9 @@ class DXPS_Settings {
 		echo '<tr><th>URL parameters</th><td><textarea name="url_identity" class="large-text" rows="3" placeholder="email | em' . "\n" . 'phone | ph' . "\n" . 'name | name">' . esc_textarea( DXPS_Helpers::opt( 'url_identity' ) ) . '</textarea><p class="description">One per line: <code>url_parameter | field</code>. For email, SMS or booking links that arrive with customer details in the URL (for example <code>?email=…&amp;phone=…</code>). Fields: <code>em</code> <code>ph</code> <code>fn</code> <code>ln</code> <code>name</code> (full name) <code>ct</code> <code>st</code> <code>zp</code> <code>country</code>. Values are hashed in the browser and never sent as part of a page URL.</p></td></tr>';
 		echo '<tr><th>Phone numbers</th><td>'; self::c( 'phone_default_country', 'Assume the store country for phone numbers written without a country code', 'Meta only matches phone numbers that include a country code. Without this, local-format numbers from forms that have no country field are dropped.' ); echo '</td></tr>';
 		echo '<tr><th>Browser ID fallback</th><td>'; self::c( 'fbp_fallback', 'Create the _fbp browser ID cookie when Meta&#8217;s script is blocked', 'Ad blockers stop Meta&#8217;s script, so it never sets <code>_fbp</code> and server events lose that signal. DX then creates the cookie in Meta&#8217;s own format, after consent.' ); echo '</td></tr>';
+		echo '<tr><th>Visitor IPv6</th><td>'; self::c( 'ip6_lookup', 'Look up the visitor&#8217;s IPv6 address in the browser and send it with server events', 'Meta prefers IPv6 and reports server events that carry IPv4 while the pixel sees IPv6. A site reached over IPv4 cannot see the IPv6 address itself, so after consent the visitor&#8217;s browser asks the service below once a day (Meta&#8217;s own example uses api64.ipify.org). Mention this third-party request in your privacy policy.' );
+		echo '<p><input type="url" name="ip6_url" value="' . esc_attr( (string) DXPS_Helpers::opt( 'ip6_url', 'https://api64.ipify.org' ) ) . '" class="regular-text"> <span class="description">IPv6-capable &#8220;what is my IP&#8221; address that returns the IP as plain text.</span></p></td></tr>';
+		echo '<tr><th>In-app click ID</th><td>'; self::c( 'param_builder', 'Use Meta&#8217;s Parameter Builder in the Facebook and Instagram in-app browsers', 'Those browsers often open ad links without the click ID in the address. When no click ID is stored, Meta&#8217;s official script (pinned version, from cdn.jsdelivr.net) recovers it there. Other browsers load nothing extra.' ); echo '</td></tr>';
 		echo '<tr><th>Location fill-in</th><td><select name="geo_enrich">';
 		foreach ( array( '' => 'Off (default)', 'country' => 'Country', 'full' => 'Country, city, region and ZIP' ) as $gk => $gl ) {
 			echo '<option value="' . esc_attr( $gk ) . '" ' . selected( (string) DXPS_Helpers::opt( 'geo_enrich' ), $gk, false ) . '>' . esc_html( $gl ) . '</option>';
@@ -307,6 +313,18 @@ class DXPS_Settings {
 			'direct'     => 'Requests arrive <strong>directly</strong> (or the host already restores visitor addresses). DX uses the connection address.',
 		);
 		echo '<h2>Visitor IP address</h2><p>' . $labels[ $setup ] . ' Address detected for your own request: <code>' . esc_html( DXPS_Helpers::client_ip() ?: 'none' ) . '</code>. It should match the address shown by any &#8220;what is my IP&#8221; site. If it does not, use the <code>dxps_client_ip</code> filter.</p>';
+		// 2.3.1: relay delivery over the last 7 days. Refusals point at the cause when Meta reports fewer server events than pixel events.
+		$rs = DXPS_Helpers::relay_stats( 7 );
+		$why = array( 'origin' => 'Wrong address (the page was opened on an address DX does not count as this site)', 'rate' => 'Rate limit (browser-minutes over the limit)', 'bot' => 'Bot filter', 'size' => 'Request too large', 'consent' => 'No marketing consent', 'sensitive' => 'Health-related page (never sent)', 'meta_error' => 'Meta rejected the call (check the token)' );
+		echo '<h2>Server relay, last 7 days</h2>';
+		if ( ! $rs ) {
+			echo '<p>No refused or failed relay requests recorded.' . ( DXPS_Helpers::on( 'event_log' ) ? '' : ' Successful sends are counted only while the event log is on.' ) . '</p>';
+		} else {
+			echo '<table class="widefat striped" style="max-width:720px"><tbody>';
+			if ( isset( $rs['sent'] ) ) echo '<tr><td>Events sent to the Conversions API</td><td>' . (int) $rs['sent'] . ( isset( $rs['sent_ipv6'] ) ? ' (' . (int) $rs['sent_ipv6'] . ' with an IPv6 address)' : '' ) . '</td></tr>';
+			foreach ( $why as $k => $label ) if ( ! empty( $rs[ $k ] ) ) echo '<tr><td>' . esc_html( $label ) . '</td><td>' . (int) $rs[ $k ] . '</td></tr>';
+			echo '</tbody></table><p class="description">Requests refused for consent or health reasons are intended. Many &#8220;wrong address&#8221; or &#8220;rate limit&#8221; refusals explain a Meta diagnostic saying the server sends fewer events than the pixel.</p>';
+		}
 		echo '<h2>Matching-field coverage</h2>';
 		if ( ! DXPS_Helpers::on( 'event_log' ) ) {
 			echo '<p>The event log is off. Turn on <strong>Event log</strong> on the Events &amp; Parameters tab, browse the shop and place a test order, then come back here.</p>';

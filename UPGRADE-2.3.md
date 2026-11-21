@@ -38,3 +38,29 @@ State the 90-day period in the privacy policy.
 ## Regression checks
 
 `php tests/run.php` and `node tests/browser.js` (Playwright) now also cover the matching cookie, merge order, relay identity without a nonce, IP selection (Cloudflare, local proxy, forged headers), the phone country from the site language, the single pixel init, form-to-cookie hashing and consent withdrawal.
+
+---
+
+# 2.3.1: fixes for the Events Manager diagnostics
+
+## What changes
+
+- **fbp (browser ID).** DX now writes `_fbp` in Meta's own format before the pixel starts, and `fbevents.js` adopts it. Before this, the first server copy of a new visitor's events usually left without fbp, because Meta's script had not loaded yet.
+- **"Server sends fewer events than the pixel".** The relay now accepts the site's www and bare addresses, and an https site's own http pages. Before this, a visitor on the address that is not set as the site address had every server event refused. The rate limit now counts each browser separately; previously everyone behind one mobile-carrier or Cloudflare address shared a single limit. Diagnostics → Server relay lists every refused request by reason for the last 7 days.
+- **"Update to IPv6".** If the site is reached over IPv4, the server can never see a visitor's IPv6 address. After consent, the browser now asks an IPv6 "what is my IP" service for its own address once a day. Server events then use that address when the connection itself is IPv4. The service is api64.ipify.org by default (the one in Meta's own example), configurable under Events & Parameters → Visitor IPv6. Add it to your privacy policy.
+- **fbc (click ID).** A click ID that the landing page could not store is recovered from the previous page. This happens when consent was given on the second page, or a script redirect dropped the address parameters. Inside the Facebook and Instagram in-app browsers, Meta's official Parameter Builder is loaded (pinned version, cdn.jsdelivr.net) when no click ID is stored.
+
+Both new options are on after the update and can be switched off under Events & Parameters.
+
+## Reading Meta's recommendations
+
+| Recommendation | What it means | What DX does |
+|---|---|---|
+| Send email / phone | Share of events that carry them | Sent for every visitor who typed them in a form, logged in or bought (2.3.0). Visitors who never identified themselves have none. That is normal for PageView, PageScroll and ViewCategory, and no plugin can send them. |
+| Send Facebook Login ID | Only accounts created through Facebook login have one | Read from common login plugins (Diagnostics shows how many accounts have it). Without Facebook login on the site, ignore it. |
+| Increase fbc coverage | Only visits from an ad click have a click ID | Kept for 90 days. Recovered from the previous page and in Facebook / Instagram in-app browsers (2.3.1). Organic and direct visits never have one, so 20–40% is common. |
+| fbp below 100% | Server events without the browser ID | Created before the pixel starts (2.3.1). |
+| Update to IPv6 / mismatched IP | The server's IP differs from what the pixel saw | Cloudflare visitor IP (2.3.0) and browser IPv6 lookup (2.3.1). |
+| Server sends fewer events than the pixel | Some server copies were refused or not sent | Address and rate-limit fixes (2.3.1). The causes that remain are listed under Diagnostics → Server relay. |
+
+Meta's scores look back over 7 to 28 days, so the effect shows gradually over 2 to 7 days after updating.
