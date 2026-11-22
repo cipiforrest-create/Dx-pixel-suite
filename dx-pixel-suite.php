@@ -3,7 +3,7 @@
  * Plugin Name: DX Pixel Suite
  * Plugin URI:  https://digitalx.ba
  * Description: WooCommerce and content tracking with Meta Pixel/CAPI, GA4, Google Ads, consent controls and scheduled product catalogues for Google, Meta, Pinterest and Microsoft.
- * Version:     2.3.1
+ * Version:     2.4.0
  * Author:      Digital X
  * Text Domain: dx-pixel-suite
  * Requires PHP: 7.4
@@ -12,7 +12,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'DXPS_VERSION', '2.3.1' );
+define( 'DXPS_VERSION', '2.4.0' );
 define( 'DXPS_FILE', __FILE__ );
 define( 'DXPS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'DXPS_URL', plugin_dir_url( __FILE__ ) );
@@ -21,6 +21,7 @@ require_once DXPS_DIR . 'includes/class-dxps-helpers.php';
 require_once DXPS_DIR . 'includes/class-dxps-settings.php';
 require_once DXPS_DIR . 'includes/class-dxps-tracking.php';
 require_once DXPS_DIR . 'includes/class-dxps-server.php';
+require_once DXPS_DIR . 'includes/class-dxps-email-identity.php';
 require_once DXPS_DIR . 'includes/class-dxps-jobs.php';
 require_once DXPS_DIR . 'includes/class-dxps-delivery.php';
 require_once DXPS_DIR . 'includes/class-dxps-feed-product.php';
@@ -94,7 +95,7 @@ register_activation_hook( __FILE__, function () {
 		'content_engaged'       => 1,
 		'content_read_scroll'   => 50,
 		'content_read_time'     => 30,
-		'geo_enrich'            => 'country', // '' | country | full (2.3.0 default: country)
+		'geo_enrich'            => 'full',  // '' | country | full (default full since 2.4.0; needs Cloudflare)
 		// 2.2.0
 		'gads_merchant_id'      => '',      // Merchant Center ID: cart data on the Google Ads purchase conversion
 		'gads_feed_country'     => '',
@@ -105,6 +106,8 @@ register_activation_hook( __FILE__, function () {
 		'ip6_lookup'            => 1,       // browser looks up its IPv6 address after consent (Meta prefers IPv6)
 		'ip6_url'               => 'https://api64.ipify.org',
 		'param_builder'         => 1,       // Meta Parameter Builder in Facebook / Instagram in-app browsers
+		// 2.4.0
+		'email_identity'        => 1,       // signed recognition token in order-email links
 	);
 	$existing = get_option( 'dxps_settings', array() );
 	update_option( 'dxps_settings', array_merge( $defaults, (array) $existing ) );
@@ -148,6 +151,13 @@ add_action( 'plugins_loaded', function () {
 				$changed = true;
 				update_option( 'dxps_emq_231', time(), false );
 			}
+			// 2.4.0 (once): city / region / ZIP fill-in from Cloudflare (it never worked before 2.4.0) and order-email links.
+			if ( version_compare( (string) get_option( 'dxps_version', '0' ), '2.4.0', '<' ) && ! get_option( 'dxps_emq_240' ) ) {
+				if ( in_array( (string) ( $o['geo_enrich'] ?? '' ), array( '', 'country' ), true ) ) $o['geo_enrich'] = 'full';
+				if ( ! array_key_exists( 'email_identity', $o ) ) $o['email_identity'] = 1;
+				$changed = true;
+				update_option( 'dxps_emq_240', time(), false );
+			}
 			if ( $changed ) update_option( 'dxps_settings', $o );
 		}
 		update_option( 'dxps_version', DXPS_VERSION, false );
@@ -160,4 +170,5 @@ add_action( 'plugins_loaded', function () {
 	DXPS_Delivery::init();
 	DXPS_Feeds::init();
 	DXPS_Product_Fields::init();
+	DXPS_Email_Identity::init();
 } );

@@ -67,7 +67,18 @@ function get_user_meta() { return ''; }
 // 2.3.0: account lookup, auth-cookie validation (REST relay identity) and site locale.
 function get_userdata( $id ) { if ( ! $id ) return false; $u = new stdClass; $u->ID = $id; $u->roles = array( 'customer' ); $u->user_email = 'user' . $id . '@example.com'; $u->first_name = 'Ana'; $u->last_name = 'Marić'; return $u; }
 function wp_validate_auth_cookie( $c = '', $s = '' ) { return ! empty( $_COOKIE[ LOGGED_IN_COOKIE ] ) ? ( $GLOBALS['t']['auth_user'] ?? 0 ) : false; }
-function get_locale() { return $GLOBALS['t']['locale'] ?? 'en_US'; } function current_user_can() { return false; }
+function get_locale() { return $GLOBALS['t']['locale'] ?? 'en_US'; }
+// 2.4.0: orders, salts (order-email recognition).
+function wp_salt( $s = 'auth' ) { return 'test-salt-' . $s; }
+class WC_Order {
+	public $d;
+	function __construct( $d ) { $this->d = $d + array( 'id' => 1, 'meta' => array(), 'customer_id' => 0, 'email' => '', 'phone' => '', 'first' => '', 'last' => '', 'city' => '', 'state' => '', 'zip' => '', 'country' => '' ); }
+	function get_id() { return $this->d['id']; } function get_meta( $k, $single = true ) { return $this->d['meta'][ $k ] ?? ''; }
+	function get_customer_id() { return $this->d['customer_id']; } function get_billing_email() { return $this->d['email']; } function get_billing_phone() { return $this->d['phone']; }
+	function get_billing_first_name() { return $this->d['first']; } function get_billing_last_name() { return $this->d['last']; } function get_billing_city() { return $this->d['city']; }
+	function get_billing_state() { return $this->d['state']; } function get_billing_postcode() { return $this->d['zip']; } function get_billing_country() { return $this->d['country']; }
+}
+function wc_get_order( $id ) { return $GLOBALS['t']['orders'][ $id ] ?? false; } function current_user_can() { return false; }
 function is_admin() { return false; } function wp_doing_ajax() { return false; } function wp_doing_cron() { return false; }
 function wp_generate_uuid4() { return sprintf( '%08x-%04x-4%03x-a%03x-%012x', mt_rand(), mt_rand( 0, 0xffff ), mt_rand( 0, 0xfff ), mt_rand( 0, 0xfff ), mt_rand() ); }
 function wp_remote_post( $url, $args ) { $GLOBALS['t']['http'][] = array( 'url' => $url, 'body' => json_decode( $args['body'], true ), 'headers' => $args['headers'] ); return array( 'code' => 200, 'body' => json_encode( array( 'events_received' => count( json_decode( $args['body'], true )['data'] ?? array( 1 ) ) ) ) ); }
@@ -90,6 +101,7 @@ function wc_get_product_id_by_sku( $s ) { return 0; } function wc_get_formatted_
 require dirname( __DIR__ ) . '/includes/class-dxps-helpers.php';
 require dirname( __DIR__ ) . '/includes/class-dxps-jobs.php';
 require dirname( __DIR__ ) . '/includes/class-dxps-server.php';
+require dirname( __DIR__ ) . '/includes/class-dxps-email-identity.php';
 require dirname( __DIR__ ) . '/includes/class-dxps-tracking.php';
 require dirname( __DIR__ ) . '/includes/class-dxps-feed-product.php';
 require dirname( __DIR__ ) . '/includes/class-dxps-feed-options.php';

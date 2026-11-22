@@ -505,6 +505,9 @@ class DXPS_Helpers {
 		if ( $live && $data != $remembered ) self::remember_user_data( $data );
 		$browser = self::cookie_user_data();
 		if ( $browser && ! ( ! empty( $browser['em'] ) && ! empty( $data['em'] ) && $browser['em'] !== $data['em'] ) ) $data = array_merge( $browser, $data );
+		// 2.4.0: for a visitor who has given nothing, WooCommerce's "country" is only the store's default customer
+		// location. The visitor's real (Cloudflare) country is better then; the relay adds it as the lowest layer.
+		if ( isset( $data['country'] ) && ! array_intersect_key( $data, array_flip( array( 'em','ph','fn','ln' ) ) ) && isset( self::geo_hashes()['country'] ) ) unset( $data['country'] );
 		return $data;
 	}
 
@@ -675,7 +678,9 @@ class DXPS_Helpers {
 	 * only where the customer has not given that field. Approximate, and derived from the IP Meta already receives.
 	 */
 	public static function geo_hashes() {
-		if ( ! apply_filters( 'dxps_trust_proxy_headers', false ) ) return array();
+		// Cloudflare's location headers are only believed when the request really came from a Cloudflare edge server
+		// (2.4.0; before, only with the dxps_trust_proxy_headers filter, so the setting silently did nothing).
+		if ( 'cloudflare' !== self::ip_setup() && ! apply_filters( 'dxps_trust_proxy_headers', false ) ) return array();
 		$mode = (string) self::opt( 'geo_enrich' );
 		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
 		$raw = array();
@@ -962,6 +967,23 @@ class DXPS_Helpers {
 			foreach ( (array) $row as $k => $v ) $out[ $k ] = ( $out[ $k ] ?? 0 ) + (int) $v;
 		}
 		return $out;
+	}
+
+	/**
+	 * 2.4.0: signed recognition token for links in a customer's WooCommerce emails: order_id.expiry.signature.
+	 * Carries no personal data; the signature (HMAC-SHA256 with the site's auth salt) stops anyone from making one.
+	 */
+	public static function identity_token( $order_id, $ttl = 0 ) {
+		$payload = (int) $order_id . '.' . ( time() + ( $ttl ? (int) $ttl : 90 * DAY_IN_SECONDS ) );
+		return $payload . '.' . substr( hash_hmac( 'sha256', 'dxps-id|' . $payload, wp_salt( 'auth' ) ), 0, 32 );
+	}
+
+	/** Order ID of a valid, unexpired recognition token, else 0. */
+	public static function identity_order_id( $token ) {
+		if ( ! is_string( $token ) || ! preg_match( '/^([0-9]{1,12})\.([0-9]{10})\.([a-f0-9]{32})$/', $token, $m ) ) return 0;
+		if ( (int) $m[2] < time() ) return 0;
+		$expect = substr( hash_hmac( 'sha256', 'dxps-id|' . $m[1] . '.' . $m[2], wp_salt( 'auth' ) ), 0, 32 );
+		return hash_equals( $expect, $m[3] ) ? (int) $m[1] : 0;
 	}
 
 	/** Diagnostics: how the visitor IP is being resolved on this server. */

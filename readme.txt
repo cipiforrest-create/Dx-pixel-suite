@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
 Version: 2.1.0
-Stable tag: 2.3.1
+Stable tag: 2.4.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,12 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 2.4.0 =
+* Location fill-in works: city, region, ZIP and country from Cloudflare's visitor-location headers are added to server events when the customer gave none (since 2.2.0 the setting silently did nothing). Trusted only for requests that really come through Cloudflare. Default: country, city, region and ZIP.
+* Anonymous visitors: WooCommerce's default customer country (the store's country) no longer stands in for the visitor's real country.
+* Order-email links: links to the shop in WooCommerce customer order emails carry a signed token without personal data. A buyer who opens one (and has given consent) is recognised on that device: hashed email, phone, name and address, and the browser ID from checkout. Setting "Order-email links", on by default; only for orders whose buyer allowed marketing.
+* Diagnostics: whether Cloudflare's location headers arrive.
 
 = 2.3.1 =
 * Browser ID (fbp) on every server event: _fbp is created before the pixel starts, so a new visitor's first server events carry it (Meta reported about 86%).

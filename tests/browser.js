@@ -66,9 +66,11 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 
 	/* ---- 2.3.0: guest on a cached page: form fill -> cookie -> next page's first init ---- */
 	const ctx2 = await browser.newContext();
-	const g = await ctx2.newPage(); let gIp6 = 0;
+	const g = await ctx2.newPage(); let gIp6 = 0; const gCalls = [];
 	await g.route('**/*', route => {
 		const u = route.request().url();
+		if (u.includes('/wp-json/dxps/v1/id')) { gCalls.push('id:' + JSON.parse(route.request().postData()).token); return route.fulfill({ contentType: 'application/json', body: '{"ok":true}' }); }
+		if (u.includes('/wp-json/dxps/v1/e')) gCalls.push('e');
 		if (u.includes('api64.ipify.org')) { gIp6++; return route.fulfill({ contentType: 'text/plain', headers: { 'access-control-allow-origin': '*' }, body: '2a02:810d:4b00:1::77' }); }
 		if (u.includes('/wp-json/')) return route.fulfill({ contentType: 'application/json', body: '{"ok":true}' });
 		if (u.endsWith('/jquery-stub.js')) return route.fulfill({ contentType: 'text/javascript', body: jq });
@@ -97,6 +99,16 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 	ok(gIp6 === 1 && decodeURIComponent((await g.evaluate(() => (document.cookie.match(/_dxps_ip=([^;]*)/) || [])[1] || ''))) === '2a02:810d:4b00:1::77', 'IPv6 lookup: one request, address kept for server events (' + gIp6 + ' calls)');
 	await g.goto('https://shop.test/kontakt/', { referer: 'https://shop.test/kontakt/?fbclid=RefClick12345' });
 	ok(/_fbc=fb\.1\.\d{13}\.RefClick12345/.test(await g.evaluate(() => document.cookie)), 'click ID recovered from the previous page when the landing page lost it');
+	// 2.4.0: order-email link
+	const tok = '55.1999999999.' + 'a1'.repeat(16);
+	gCalls.length = 0;
+	await g.goto('https://shop.test/kontakt/?x=1&dxr=' + tok);
+	await g.waitForTimeout(1200);
+	const gLoc = await g.evaluate(() => location.search);
+	ok(gLoc === '?x=1', 'order-email token removed from the address bar: ' + gLoc);
+	const idCalls = gCalls.filter(c => c.indexOf('id:') === 0);
+	ok(idCalls.length === 1 && idCalls[0] === 'id:' + tok, 'token handed to the server once: ' + gCalls.join(','));
+	ok(gCalls.indexOf('e') > -1 && gCalls.findIndex(c => c.indexOf('id:') === 0) < gCalls.indexOf('e'), 'recognition happens before the page events are relayed: ' + gCalls.join(','));
 	await g.evaluate(() => window.dxpsConsent('denied'));
 	const afterDeny = await g.evaluate(() => document.cookie);
 	ok(!afterDeny.includes('_dxps_ud=') && !afterDeny.includes('_dxps_ip='), 'consent withdrawal deletes the matching and IP cookies');

@@ -141,6 +141,9 @@ gtag('set','page_location',window.dxpsPageUrl());try{var dxRef=new URL(document.
 </script>
 
 DXPS_PAGE_URL;
+		// 2.4.0: a recognition token from an order-email link (dxr) is moved out of the address at once, so it never
+		// reaches analytics, shared links or the browser history, and is kept for this tab only until it is used.
+		echo "<script>(function(){try{var u=new URL(location.href),t=u.searchParams.get('dxr');if(t===null)return;if(/^[0-9]{1,12}\\.[0-9]{10}\\.[a-f0-9]{32}$/.test(t))sessionStorage.setItem('dxps_r',t);u.searchParams.delete('dxr');history.replaceState(history.state,'',u.pathname+u.search+u.hash);}catch(e){}})();</script>\n";
 		if ( $title_js ) echo '<script>' . $title_js . "</script>\n";
 
 		/* ---- Consent Mode v2 default (before any tag) ---- */
@@ -178,7 +181,7 @@ if(g){if(w.dxpsInitIdentity)w.dxpsInitIdentity();if(w.dxpsInitMeta)w.dxpsInitMet
 else{
  if(w.dxpsCfg&&w.dxpsCfg.forgetUrl)fetch(w.dxpsCfg.forgetUrl,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:'{}'}).catch(function(){});
  ['pbid','_dxps_eid','_dxps_cid','_dxps_src','_dxps_lt','_dxps_lp','_dxps_ud','_dxps_ip','_dxps_ipc','_fbp','_fbc'].forEach(function(n){document.cookie=n+'=;path=/;max-age=0;SameSite=Lax'});
- try{sessionStorage.removeItem('eh_customer_hashes');Object.keys(localStorage).forEach(function(k){if(k.indexOf('eh_')===0||k.indexOf('dxps_')===0)localStorage.removeItem(k)})}catch(e){}
+ try{sessionStorage.removeItem('eh_customer_hashes');sessionStorage.removeItem('dxps_r');Object.keys(localStorage).forEach(function(k){if(k.indexOf('eh_')===0||k.indexOf('dxps_')===0)localStorage.removeItem(k)})}catch(e){}
  w.__ehHashedCustomerData=null;w.dxpsQ=[];gtag('set','user_data',null);
 }
 document.dispatchEvent(new CustomEvent('dxps:consent',{detail:s}));
@@ -286,6 +289,8 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			// 2.3.1: browser IPv6 lookup (after consent) and Meta's Parameter Builder in Facebook / Instagram in-app browsers.
 			'ip6Url'      => ( $meta && DXPS_Helpers::on( 'ip6_lookup' ) ) ? esc_url_raw( (string) DXPS_Helpers::opt( 'ip6_url', 'https://api64.ipify.org' ) ) : '',
 			'paramBuilder'=> ( $meta && DXPS_Helpers::on( 'param_builder' ) ) ? 1 : 0,
+			// 2.4.0: recognition from order-email links.
+			'idUrl'       => ( DXPS_Helpers::on( 'email_identity' ) && DXPS_Helpers::on( 'auto_am' ) && ( $meta || $ga4 ) ) ? esc_url_raw( rest_url( 'dxps/v1/id' ) ) : '',
 			'urlIdentity' => DXPS_Helpers::on( 'auto_am' ) ? DXPS_Helpers::url_identity() : array(),
 			'baseCountry' => DXPS_Helpers::on( 'phone_default_country' ) ? strtolower( DXPS_Helpers::default_country() ) : '',
 			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,

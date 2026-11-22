@@ -14,7 +14,7 @@ class DXPS_Settings {
 		),
 		'events' => array(
 			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich', 'ip6_url' ),
-			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged', 'ip6_lookup', 'param_builder' ),
+			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged', 'ip6_lookup', 'param_builder', 'email_identity' ),
 		),
 		'consent' => array(
 			'text' => array(),
@@ -220,10 +220,11 @@ class DXPS_Settings {
 		echo '<p><input type="url" name="ip6_url" value="' . esc_attr( (string) DXPS_Helpers::opt( 'ip6_url', 'https://api64.ipify.org' ) ) . '" class="regular-text"> <span class="description">IPv6-capable &#8220;what is my IP&#8221; address that returns the IP as plain text.</span></p></td></tr>';
 		echo '<tr><th>In-app click ID</th><td>'; self::c( 'param_builder', 'Use Meta&#8217;s Parameter Builder in the Facebook and Instagram in-app browsers', 'Those browsers often open ad links without the click ID in the address. When no click ID is stored, Meta&#8217;s official script (pinned version, from cdn.jsdelivr.net) recovers it there. Other browsers load nothing extra.' ); echo '</td></tr>';
 		echo '<tr><th>Location fill-in</th><td><select name="geo_enrich">';
-		foreach ( array( '' => 'Off (default)', 'country' => 'Country', 'full' => 'Country, city, region and ZIP' ) as $gk => $gl ) {
+		foreach ( array( '' => 'Off', 'country' => 'Country', 'full' => 'Country, city, region and ZIP (default since 2.4.0)' ) as $gk => $gl ) {
 			echo '<option value="' . esc_attr( $gk ) . '" ' . selected( (string) DXPS_Helpers::opt( 'geo_enrich' ), $gk, false ) . '>' . esc_html( $gl ) . '</option>';
 		}
 		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Anything the customer types always wins.</p></td></tr>';
+		echo '<tr><th>Order-email links</th><td>'; self::c( 'email_identity', 'Recognise returning buyers who open a link in their order email', 'Links to the shop in WooCommerce customer emails about an order get a signed token with no personal data in it. When the buyer opens one and has given consent, their order&#8217;s hashed details are kept in their browser, so later visits match them. Only for orders whose buyer allowed marketing at checkout. Mention it in your privacy policy.' ); echo '</td></tr>';
 		echo '</table><h2>Content tracking (blog posts, pages, services)</h2><table class="form-table">';
 		echo '<tr><th>Track these content types</th><td>';
 		$chosen = DXPS_Helpers::content_types();
@@ -313,6 +314,13 @@ class DXPS_Settings {
 			'direct'     => 'Requests arrive <strong>directly</strong> (or the host already restores visitor addresses). DX uses the connection address.',
 		);
 		echo '<h2>Visitor IP address</h2><p>' . $labels[ $setup ] . ' Address detected for your own request: <code>' . esc_html( DXPS_Helpers::client_ip() ?: 'none' ) . '</code>. It should match the address shown by any &#8220;what is my IP&#8221; site. If it does not, use the <code>dxps_client_ip</code> filter.</p>';
+		// 2.4.0: Cloudflare location headers (city / region / ZIP fill-in needs them).
+		if ( 'cloudflare' === $setup ) {
+			$geo_ok = ! empty( $_SERVER['HTTP_CF_IPCITY'] ) || ! empty( $_SERVER['HTTP_CF_POSTAL_CODE'] );
+			echo '<p><strong>Location headers:</strong> ' . ( $geo_ok
+				? '<span style="color:#00a32a;font-weight:600">arriving</span> (city / region / ZIP fill-in works).'
+				: '<span style="color:#d63638;font-weight:600">missing</span>. Only the country is filled in. In Cloudflare open Rules &rarr; Settings (Managed Transforms) and switch on <em>Add visitor location headers</em>.' ) . '</p>';
+		}
 		// 2.3.1: relay delivery over the last 7 days. Refusals point at the cause when Meta reports fewer server events than pixel events.
 		$rs = DXPS_Helpers::relay_stats( 7 );
 		$why = array( 'origin' => 'Wrong address (the page was opened on an address DX does not count as this site)', 'rate' => 'Rate limit (browser-minutes over the limit)', 'bot' => 'Bot filter', 'size' => 'Request too large', 'consent' => 'No marketing consent', 'sensitive' => 'Health-related page (never sent)', 'meta_error' => 'Meta rejected the call (check the token)' );

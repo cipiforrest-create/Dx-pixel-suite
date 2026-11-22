@@ -1,5 +1,6 @@
 <?php
 if ( 'cli' !== PHP_SAPI ) exit; // never runs over the web
+ob_start(); // keeps headers unsent, so setcookie() in the code under test works; printed at the end
 require __DIR__ . '/bootstrap.php';
 $fail = 0;
 function ok( $cond, $label ) { global $fail; echo ( $cond ? '  ok   ' : '  FAIL ' ) . $label . "\n"; if ( ! $cond ) $fail++; }
@@ -177,6 +178,61 @@ $_SERVER['HTTP_REFERER'] = 'http://evil.test/?fbclid=Forged12345';
 ok( '' === DXPS_Helpers::fbc(), 'click ID from a foreign referrer is ignored' );
 $_SERVER = $srv;
 
+/* ---------------- 2.4.0: location fill-in, order-email recognition ---------------- */
+echo "Identity sources (2.4.0)\n";
+settings( array( 'geo_enrich' => 'full', 'auto_am' => 1, 'consent_mode' => 0 ) );
+$srv = $_SERVER; $GLOBALS['t']['user'] = 0; $GLOBALS['t']['transients'] = array();
+$_SERVER = array_merge( $_SERVER, array( 'REMOTE_ADDR' => '172.70.1.1', 'HTTP_CF_CONNECTING_IP' => '89.146.10.20', 'HTTP_CF_IPCOUNTRY' => 'BA', 'HTTP_CF_IPCITY' => 'Sarajevo', 'HTTP_CF_REGION_CODE' => 'BIH', 'HTTP_CF_POSTAL_CODE' => '71000' ) );
+$geo = DXPS_Helpers::geo_hashes();
+ok( hash( 'sha256', 'sarajevo' ) === ( $geo['ct'] ?? '' ) && hash( 'sha256', '71000' ) === ( $geo['zp'] ?? '' ) && hash( 'sha256', 'bih' ) === ( $geo['st'] ?? '' ) && hash( 'sha256', 'ba' ) === ( $geo['country'] ?? '' ), 'through Cloudflare: city, region, ZIP and country are filled in' );
+$_SERVER['REMOTE_ADDR'] = '89.146.10.30';
+ok( array() === DXPS_Helpers::geo_hashes(), 'direct request: forged Cloudflare location headers are ignored' );
+$_SERVER['REMOTE_ADDR'] = '172.70.1.1';
+$_COOKIE = array( '_dxps_ud' => 'country.' . hash( 'sha256', 'de' ) );
+ok( ! isset( DXPS_Helpers::user_data_full()['country'] ), 'anonymous visitor: a guessed country gives way to the real (Cloudflare) one' );
+$_COOKIE = array( '_dxps_ud' => 'em.' . hash( 'sha256', 'a@b.ba' ) . '~ct.' . hash( 'sha256', 'mostar' ) );
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'meta_capi_token' => 'tok', 'auto_am' => 1, 'consent_mode' => 0, 'geo_enrich' => 'full' ) );
+$n0 = count( $GLOBALS['t']['http'] );
+DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'scroll', 'g.1' ) ) ), $h ) );
+$ud = $GLOBALS['t']['http'][ $n0 ]['body']['data'][0]['user_data'] ?? array();
+ok( hash( 'sha256', 'mostar' ) === ( $ud['ct'] ?? '' ) && hash( 'sha256', '71000' ) === ( $ud['zp'] ?? '' ), 'customer data wins over the location fill-in, missing fields are filled' );
+
+$tok = DXPS_Helpers::identity_token( 55 );
+ok( 55 === DXPS_Helpers::identity_order_id( $tok ), 'order-email token: signed and readable' );
+ok( 0 === DXPS_Helpers::identity_order_id( substr( $tok, 0, -1 ) . ( 'a' === substr( $tok, -1 ) ? 'b' : 'a' ) ) && 0 === DXPS_Helpers::identity_order_id( '56' . substr( $tok, 2 ) ) && 0 === DXPS_Helpers::identity_order_id( DXPS_Helpers::identity_token( 55, -60 ) ) && 0 === DXPS_Helpers::identity_order_id( 'x' ), 'tampered, other-order, expired and malformed tokens are refused' );
+$eid64 = hash( 'sha256', 'checkout-browser' );
+$GLOBALS['t']['orders'] = array(
+	55 => new WC_Order( array( 'id' => 55, 'email' => 'Kupac@Example.com', 'phone' => '061 222 333', 'first' => 'Lejla', 'last' => 'Begić', 'city' => 'Tuzla', 'zip' => '75000', 'country' => 'BA', 'meta' => array( '_dxps_marketing_allowed' => '1', '_dxps_eid' => $eid64 ) ) ),
+	56 => new WC_Order( array( 'id' => 56, 'email' => 'no@example.com', 'meta' => array( '_dxps_marketing_allowed' => '0' ) ) ),
+);
+settings( array( 'auto_am' => 1, 'email_identity' => 1, 'consent_mode' => 0 ) );
+$GLOBALS['t']['options']['dxps_relay_stats'] = array(); $_COOKIE = array();
+$res = DXPS_Server::identify( new WP_REST_Request( array( 'token' => $tok ), $h ) );
+$ud  = DXPS_Helpers::cookie_user_data();
+ok( true === $res->data['ok'] && hash( 'sha256', 'kupac@example.com' ) === ( $ud['em'] ?? '' ) && hash( 'sha256', '38761222333' ) === ( $ud['ph'] ?? '' ) && hash( 'sha256', 'lejla' ) === ( $ud['fn'] ?? '' ), 'email link: the buyer is recognised (hashed email, phone, name in the browser cookie)' );
+ok( $eid64 === ( $_COOKIE['pbid'] ?? '' ) && 1 === count( $res->data ), 'new device takes the checkout browser ID; the response carries no personal data' );
+$_COOKIE = array();
+$res = DXPS_Server::identify( new WP_REST_Request( array( 'token' => DXPS_Helpers::identity_token( 56 ) ), $h ) );
+ok( false === $res->data['ok'] && array() === DXPS_Helpers::cookie_user_data() && 1 === ( DXPS_Helpers::relay_stats()['identity'] ?? 0 ), 'order without marketing consent: no recognition, refusal counted' );
+settings( array( 'auto_am' => 1, 'email_identity' => 1, 'consent_mode' => 1 ) );
+$res = DXPS_Server::identify( new WP_REST_Request( array( 'token' => $tok ), $h ) );
+ok( 'disabled_or_consent' === ( $res->data['skipped'] ?? '' ), 'no consent on the site: no recognition' );
+$_SERVER = $srv; $_COOKIE = array();
+
+$html = '<p><a href="http://shop.test/my-account/view-order/55/?a=1&amp;b=2#top">Narudžba</a> <a href="https://evil.test/x">Drugo</a> <a href=\'http://www.shop.test/\'>Shop</a></p>';
+$out = DXPS_Email_Identity::add_token( $html, 'TOKEN1' );
+ok( false !== strpos( $out, 'href="http://shop.test/my-account/view-order/55/?a=1&amp;b=2&amp;dxr=TOKEN1#top"' ) && false !== strpos( $out, "href='http://www.shop.test/?dxr=TOKEN1'" ) && false !== strpos( $out, 'href="https://evil.test/x"' ), 'email links: token added to shop links only, anchors and parameters kept' );
+settings( array( 'email_identity' => 1 ) );
+$customer_mail = new class( $GLOBALS['t']['orders'][55] ) { public $object; function __construct( $o ) { $this->object = $o; } function is_customer_email() { return true; } };
+$admin_mail    = new class( $GLOBALS['t']['orders'][55] ) { public $object; function __construct( $o ) { $this->object = $o; } function is_customer_email() { return false; } };
+DXPS_Email_Identity::remember( '', $customer_mail );
+ok( false !== strpos( DXPS_Email_Identity::rewrite( $html ), 'dxr=55.' ), 'customer order email gets the token' );
+DXPS_Email_Identity::remember( '', $admin_mail );
+ok( $html === DXPS_Email_Identity::rewrite( $html ), 'admin email is left unchanged' );
+DXPS_Email_Identity::remember( '', new class( $GLOBALS['t']['orders'][56] ) { public $object; function __construct( $o ) { $this->object = $o; } function is_customer_email() { return true; } } );
+ok( $html === DXPS_Email_Identity::rewrite( $html ), 'order without marketing consent gets no token' );
+$GLOBALS['t']['user'] = 7; // the rendered-page checks below expect the signed-in customer
+
 /* ---------------- rendered page (consumed by tests/browser.js) ---------------- */
 settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'ga4_enabled' => 1, 'ga4_id' => 'G-TEST', 'gads_enabled' => 1, 'gads_conversion_id' => 'AW-1', 'gads_purchase_label' => 'lbl', 'gads_merchant_id' => '5551234', 'gads_feed_country' => 'ba', 'gads_remarketing' => 1, 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'fbp_fallback' => 1 ) );
 $_SERVER['REQUEST_URI'] = '/product/1/';
@@ -187,12 +243,12 @@ ok( false !== strpos( $head, hash( 'sha256', 'jane@example.com' ) ) && false !==
 ok( false !== strpos( $head, '"udTtl":' ), 'cookie lifetime handed to the browser' );
 // Guest page (what a page cache would serve): no customer data in the HTML, the browser cookie supplies it.
 $GLOBALS['t']['user'] = 0; $_COOKIE = array();
-settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'am_all_forms' => 1, 'phone_default_country' => 1, 'am_retention_days' => 90, 'fbp_fallback' => 1, 'ip6_lookup' => 1, 'ip6_url' => 'https://api64.ipify.org' ) );
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'am_all_forms' => 1, 'phone_default_country' => 1, 'am_retention_days' => 90, 'fbp_fallback' => 1, 'ip6_lookup' => 1, 'ip6_url' => 'https://api64.ipify.org', 'email_identity' => 1 ) );
 $GLOBALS['t']['locale'] = 'bs_BA'; // site language decides the phone country without WooCommerce
 ob_start(); DXPS_Tracking::head_output(); $guest = ob_get_clean();
 ok( false !== strpos( $guest, '"baseCountry":"ba"' ), 'phone country from the site language reaches the browser' );
 ok( false === strpos( $guest, 'jane' ) && false === strpos( $guest, hash( 'sha256', 'jane@example.com' ) ) && false !== strpos( $guest, 'var am={}' ), 'cacheable guest page carries no customer data' );
-file_put_contents( __DIR__ . '/.page-guest.html', '<!doctype html><html><head><title>Kontakt</title>' . $guest . '</head><body>'
+file_put_contents( __DIR__ . '/.page-guest.html', '<!doctype html><html><head><title>Kontakt</title>' . str_replace( 'http:\/\/shop.test', 'https:\/\/shop.test', $guest ) . '</head><body>'
 	. '<form id="kontakt"><label for="f-name">Ime i prezime</label><input id="f-name" name="your-name" type="text">'
 	. '<input name="your-email" type="email"><label for="f-tel">Broj telefona</label><input id="f-tel" name="field_3" type="text">'
 	. '<input name="your-subject" type="text"><input name="password" type="password"></form>'

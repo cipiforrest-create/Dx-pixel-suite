@@ -86,6 +86,8 @@ class DXPS_Server {
 			'callback'            => array( __CLASS__, 'relay' ),
 		) );
 		// Customer data detected in on-page forms (Automatic Advanced Matching).
+		// 2.4.0: recognition from a signed link in the customer's own order email (DXPS_Email_Identity).
+		register_rest_route( 'dxps/v1', '/id', array( 'methods'=>'POST', 'permission_callback'=>'__return_true', 'callback'=>array( __CLASS__, 'identify' ) ) );
 		register_rest_route( 'dxps/v1', '/forget', array( 'methods'=>'POST', 'permission_callback'=>'__return_true', 'callback'=>array( __CLASS__, 'forget' ) ) );
 		register_rest_route( 'dxps/v1', '/u', array(
 			'methods'             => 'POST',
@@ -251,6 +253,34 @@ class DXPS_Server {
 	}
 
 	private static function ip() { return DXPS_Helpers::client_ip(); }
+
+	/**
+	 * 2.4.0: a visitor arrived through a link in their order email. A valid token (signed, unexpired, for an order
+	 * whose buyer allowed marketing at checkout) puts that order's hashed matching fields into this browser's
+	 * _dxps_ud cookie, so its events match the buyer. The response carries no personal data. A browser without its
+	 * own browser ID takes the one saved with the order, linking this device to the buyer's checkout browser.
+	 */
+	public static function identify( WP_REST_Request $req ) {
+		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok'=>false ), 403 );
+		if ( ! DXPS_Helpers::on( 'email_identity' ) || ! DXPS_Helpers::on( 'auto_am' ) || ! DXPS_Helpers::marketing_allowed() ) return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'disabled_or_consent' ), 200 );
+		$in    = (array) $req->get_json_params();
+		$id    = DXPS_Helpers::identity_order_id( $in['token'] ?? '' );
+		$order = ( $id && function_exists( 'wc_get_order' ) ) ? wc_get_order( $id ) : null;
+		if ( ! $order || '1' !== (string) $order->get_meta( '_dxps_marketing_allowed' ) ) {
+			DXPS_Helpers::count_relay( 'identity' );
+			return new WP_REST_Response( array( 'ok'=>false ), 200 );
+		}
+		DXPS_Helpers::sync_ud_cookie( DXPS_Helpers::user_data_from_order( $order ) );
+		$eid = strtolower( (string) $order->get_meta( '_dxps_eid' ) );
+		$has = isset( $_COOKIE['pbid'] ) && is_string( $_COOKIE['pbid'] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE['pbid'] );
+		if ( ! $has && preg_match( '/^[a-f0-9]{64}$/', $eid ) && ! headers_sent() ) {
+			setcookie( 'pbid', $eid, array( 'expires'=>time() + 365 * DAY_IN_SECONDS, 'path'=>'/', 'secure'=>is_ssl(), 'httponly'=>false, 'samesite'=>'Lax' ) );
+			$_COOKIE['pbid'] = $eid;
+		}
+		$res = new WP_REST_Response( array( 'ok'=>true ), 200 );
+		$res->header( 'Cache-Control', 'no-store, private' );
+		return $res;
+	}
 
 	public static function forget( WP_REST_Request $req ) {
 		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok'=>false ), 403 );

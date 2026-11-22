@@ -55,8 +55,23 @@
 		var p={};Object.keys(body.params||{}).forEach(function(k){if(k.charAt(0)!=='_')p[k]=body.params[k];});body.params=p;
 		relayBuf.push(body);
 		// Completed matching fields are flushed first so the first conversion can use them.
-		if(!relayTimer)relayTimer=setTimeout(function(){waitMatching(window.dxpsAmFlush?window.dxpsAmFlush():null).catch(function(){}).then(relayFlush);},350);
+		if(!relayTimer)relayTimer=setTimeout(function(){waitMatching(Promise.all([window.dxpsAmFlush?window.dxpsAmFlush():null,idPending])).catch(function(){}).then(relayFlush);},350);
 	}
+	/* 2.4.0: recognition from an order-email link. The head script kept the signed token (dxr) for this tab; once
+	   marketing is allowed it goes to the server once, which stores the order's hashed matching fields in this
+	   browser's cookie. Events relayed afterwards (this page included) carry them. */
+	var idPending=null;
+	window.dxpsIdentify=function(){
+		var t='';try{t=sessionStorage.getItem('dxps_r')||'';}catch(e){}
+		if(!t||!cfg.idUrl||!allowed()||blocked())return idPending;
+		try{sessionStorage.removeItem('dxps_r');}catch(e){}
+		idPending=fetch(cfg.idUrl,{method:'POST',credentials:'same-origin',keepalive:true,headers:apiHeaders(),body:JSON.stringify({token:t})}).then(function(r){
+			if(r.status===403&&cfg.nonce){cfg.nonce='';return fetch(cfg.idUrl,{method:'POST',credentials:'same-origin',headers:apiHeaders(),body:JSON.stringify({token:t})});}
+		}).catch(function(){});
+		return idPending;
+	};
+	window.dxpsIdentify();
+	document.addEventListener('dxps:consent',function(ev){if(ev.detail==='granted')window.dxpsIdentify();});
 	window.addEventListener('pagehide',relayFlush);
 	document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')relayFlush();});
 
