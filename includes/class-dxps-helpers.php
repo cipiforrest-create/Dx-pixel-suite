@@ -2,10 +2,24 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 class DXPS_Helpers {
+	private static $options = null;
+	public static function reset_options() { self::$options = null; }
 
 	const EXT_COOKIE = 'pbid'; // external_id cookie (PYS-compatible name)
 	const EXT_COOKIE_LEGACY = '_dxps_eid';
 	const UTM_COOKIE = '_dxps_src';
+	/** 2.3.0: first-party cookie holding this browser's hashed matching fields (never plain text). */
+	const UD_COOKIE = '_dxps_ud';
+	/** Customer-information keys Meta scores for Event Match Quality (hashed). */
+	const MATCH_KEYS = array( 'em','ph','fn','ln','ct','st','zp','country' );
+
+	/** Cloudflare's published edge ranges (https://www.cloudflare.com/ips/). Override with the dxps_cloudflare_ranges filter. */
+	const CF_RANGES = array(
+		'173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+		'190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+		'104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+		'2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+	);
 
 	// EEA + UK + CH: consent-mode-relevant regions.
 	const EEA = array( 'AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IS','IT','LV','LI','LT','LU','MT','NL','NO','PL','PT','RO','SK','SI','ES','SE','GB','CH' );
@@ -14,8 +28,8 @@ class DXPS_Helpers {
 	const FALLBACKS = array( 'track_scroll' => 1, 'track_time' => 1, 'track_clicks' => 1, 'time_on_page' => 30 );
 
 	public static function opt( $key, $default = '' ) {
-		static $o = null;
-		if ( null === $o ) $o = get_option( 'dxps_settings', array() );
+		if ( null === self::$options ) self::$options = (array) get_option( 'dxps_settings', array() );
+		$o = self::$options;
 		if ( is_array( $o ) && $o && ! array_key_exists( $key, $o ) && isset( self::FALLBACKS[ $key ] ) ) return self::FALLBACKS[ $key ];
 		return isset( $o[ $key ] ) && '' !== $o[ $key ] ? $o[ $key ] : $default;
 	}
@@ -43,8 +57,9 @@ class DXPS_Helpers {
 	 * already sends every event, so server copies would double-count - only purchase/refund can be opted in.
 	 */
 	public static function ga4_server_allowed( $event_name ) {
-		if ( ! self::engine_direct() ) return true;
-		return in_array( $event_name, array( 'purchase', 'refund' ), true ) && self::on( 'ga4_server_purchase' );
+		// GA4 does not deduplicate arbitrary browser/MP events by event_id. One owner only.
+		if ( 'purchase' === $event_name ) return 'status' === self::opt( 'purchase_trigger', 'status' ) || self::on( 'ga4_server_purchase' );
+		return in_array( $event_name, array( 'refund','login','sign_up','comment' ), true );
 	}
 
 	/* ---------------- Geo / consent ---------------- */
@@ -71,14 +86,14 @@ class DXPS_Helpers {
 		// Explicit withdrawal always wins, including when regional defaults are disabled.
 		if ( isset( $_COOKIE['_dxps_consent'] ) && 'denied' === $_COOKIE['_dxps_consent'] ) return false;
 		if ( ! self::on( 'consent_mode' ) ) return true;
-		if ( ! self::is_eea() ) return true;
 		return isset( $_COOKIE['_dxps_consent'] ) && 'granted' === $_COOKIE['_dxps_consent'];
 	}
 
 	/* ---------------- Normalisation + hashing (Meta / Google spec) ---------------- */
 
 	public static function hash( $v ) {
-		$v = trim( strtolower( (string) $v ) );
+		$v = trim( (string) $v );
+		$v = function_exists( 'mb_strtolower' ) ? mb_strtolower( $v, 'UTF-8' ) : strtolower( $v );
 		return '' === $v ? '' : hash( 'sha256', $v );
 	}
 
@@ -86,14 +101,14 @@ class DXPS_Helpers {
 		$raw = trim( (string) $phone );
 		if ( ! $raw || preg_match( '/[a-z]/i', $raw ) ) return '';
 		$p = preg_replace( '/\D/', '', $raw );
-		$prefix = array( 'BA'=>'387','RS'=>'381','HR'=>'385','SI'=>'386','DE'=>'49','AT'=>'43','CH'=>'41','ME'=>'382','MK'=>'389','GB'=>'44','US'=>'1','CA'=>'1','FR'=>'33','IT'=>'39','NL'=>'31','SE'=>'46' );
+		$prefix = array( 'BA'=>'387','RS'=>'381','HR'=>'385','SI'=>'386','DE'=>'49','AT'=>'43','CH'=>'41','ME'=>'382','MK'=>'389','GB'=>'44','US'=>'1','CA'=>'1','FR'=>'33','IT'=>'39','NL'=>'31','SE'=>'46','PL'=>'48','ES'=>'34','PT'=>'351','BE'=>'32','CZ'=>'420','SK'=>'421','HU'=>'36','RO'=>'40','BG'=>'359','GR'=>'30','IE'=>'353','DK'=>'45','NO'=>'47','FI'=>'358','AU'=>'61','NZ'=>'64','TR'=>'90' );
 		$cc = $prefix[ strtoupper( $country ) ] ?? '';
 		// 1.7.0 (opt-in): a local-format number with no country on the form is assumed to be in the store's country.
 		if ( ! $cc && self::on( 'phone_default_country' ) ) $cc = $prefix[ self::default_country() ] ?? '';
 		if ( strpos( $raw, '00' ) === 0 ) $p = substr( $p, 2 );
 		elseif ( strpos( $raw, '+' ) !== 0 ) {
 			if ( ! $cc ) return '';
-			if ( strpos( $p, $cc ) !== 0 ) $p = $cc . ltrim( $p, '0' );
+			if ( strpos( $p, $cc ) !== 0 ) $p = $cc . ( 'IT' === strtoupper( $country ) ? $p : ltrim( $p, '0' ) );
 		}
 		return preg_match( '/^[1-9][0-9]{7,14}$/', $p ) ? '+' . $p : '';
 	}
@@ -104,7 +119,11 @@ class DXPS_Helpers {
 			$loc = wc_get_base_location();
 			if ( ! empty( $loc['country'] ) ) return strtoupper( $loc['country'] );
 		}
-		return '';
+		// 2.3.0: without WooCommerce, the region of the site language (bs_BA -> BA, hr -> HR).
+		$locale = function_exists( 'get_locale' ) ? (string) get_locale() : '';
+		if ( preg_match( '/^[a-z]{2,3}_([A-Z]{2})/', $locale, $m ) ) return $m[1];
+		$lang = array( 'bs' => 'BA', 'hr' => 'HR', 'sr' => 'RS', 'sl' => 'SI', 'de' => 'DE', 'mk' => 'MK', 'cnr' => 'ME' );
+		return $lang[ strtolower( substr( $locale, 0, 3 ) ) ] ?? $lang[ strtolower( substr( $locale, 0, 2 ) ) ] ?? '';
 	}
 
 	public static function matching_value( $key, $value, $country = '' ) {
@@ -139,7 +158,7 @@ class DXPS_Helpers {
 		if ( ! is_array( $p ) || empty( $p['host'] ) || strtolower( $p['host'] ) !== strtolower( $site['host'] ) ) return home_url( '/' );
 		$path = $p['path'] ?? '/';
 		$path = preg_replace( '~/(order-received|order-pay)/[0-9]+/?$~', '/', $path );
-		return ( $site['scheme'] ?? 'https' ) . '://' . $site['host'] . $path;
+		return ( $site['scheme'] ?? 'https' ) . '://' . $site['host'] . ( isset( $site['port'] ) ? ':' . $site['port'] : '' ) . $path;
 	}
 
 	/** Keep only validated matching fields, never custom/free-text user data. */
@@ -242,22 +261,77 @@ class DXPS_Helpers {
 	 * All hashed per Meta spec — used on every relayed event to lift EMQ.
 	 */
 	/**
-	 * Plain (normalized, UNHASHED) user data for BROWSER-side Advanced Matching only.
-	 *
-	 * The Meta pixel JS library normalizes and SHA-256 hashes whatever you pass to
-	 * fbq('init', id, {...}) itself. Passing already-hashed values means it hashes the
-	 * hash — the resulting double-hash never matches any Meta user record, so browser
-	 * Advanced Matching silently contributes nothing to Event Match Quality.
-	 *
-	 * Server-side CAPI is the opposite: it requires pre-hashed values. That asymmetry is
-	 * why these are two separate methods — do NOT feed this one to the CAPI sender.
+	 * Normalized, UNHASHED user data of the current visitor (account profile + WooCommerce billing).
+	 * Hash it (matching_hashes()) before it leaves the server: the Conversions API needs SHA-256 values, and the
+	 * pixel accepts 64-character SHA-256 values unchanged, so DX hands both channels the same hashes.
 	 */
+	/**
+	 * 2.3.0: the visitor's WordPress account ID, also inside DX's own REST relay.
+	 *
+	 * WordPress treats a REST request without a valid nonce as logged out (the relay is called from cached pages,
+	 * whose nonce may have expired), so get_current_user_id() is 0 there even for a signed-in customer and every
+	 * relayed event lost the account's email, name and phone. Here the logged-in cookie is validated directly.
+	 * Read-only: used to pick matching data for the visitor's own events, never to act as the user.
+	 */
+	public static function visitor_user_id() {
+		$id = (int) get_current_user_id();
+		if ( $id > 0 ) return $id;
+		if ( ! ( defined( 'REST_REQUEST' ) && REST_REQUEST ) || ! defined( 'LOGGED_IN_COOKIE' ) || empty( $_COOKIE[ LOGGED_IN_COOKIE ] ) || ! function_exists( 'wp_validate_auth_cookie' ) ) return 0;
+		return (int) wp_validate_auth_cookie( '', 'logged_in' );
+	}
+
+	/** The visitor's WP_User (see visitor_user_id()), or null. */
+	public static function visitor_user() {
+		$id = self::visitor_user_id();
+		if ( ! $id ) return null;
+		if ( $id === (int) get_current_user_id() ) { $u = wp_get_current_user(); return ( $u && $u->exists() ) ? $u : null; }
+		$u = get_userdata( $id );
+		return $u ? $u : null;
+	}
+
+	/**
+	 * 2.3.0: the WooCommerce customer for this visitor, including inside DX's REST relay, where WooCommerce never
+	 * loads its session or customer object. Account customers are read from their saved billing address; guests
+	 * from their WooCommerce session (what they typed at checkout).
+	 */
+	public static function wc_customer() {
+		if ( ! function_exists( 'WC' ) || ! class_exists( 'WC_Customer' ) ) return null;
+		$wc = WC();
+		if ( ! empty( $wc->customer ) && $wc->customer instanceof WC_Customer ) return $wc->customer;
+		static $cache = array();
+		$uid = self::visitor_user_id();
+		$key = (string) $uid;
+		if ( array_key_exists( $key, $cache ) ) return $cache[ $key ];
+		$cache[ $key ] = null;
+		try {
+			if ( $uid ) {
+				// No session start for account customers: their billing address is stored on the account.
+				$cache[ $key ] = new WC_Customer( $uid );
+			} elseif ( self::wc_guest_session_cookie() ) {
+				if ( empty( $wc->session ) && method_exists( $wc, 'initialize_session' ) ) $wc->initialize_session();
+				if ( ! empty( $wc->session ) ) $cache[ $key ] = new WC_Customer( 0, true );
+			}
+		} catch ( \Throwable $e ) {
+			$cache[ $key ] = null;
+		}
+		return $cache[ $key ];
+	}
+
+	/** True when the request carries a WooCommerce session cookie that belongs to a guest (not an account). */
+	private static function wc_guest_session_cookie() {
+		foreach ( $_COOKIE as $name => $value ) {
+			if ( 0 !== strpos( (string) $name, 'wp_woocommerce_session_' ) || ! is_string( $value ) ) continue;
+			$customer = explode( '||', $value )[0];
+			return '' !== $customer && ! ctype_digit( $customer );
+		}
+		return false;
+	}
+
 	public static function user_data_plain() {
 		if ( ! self::marketing_allowed() ) return array();
-		$raw = array(); $u = wp_get_current_user();
-		if ( $u && $u->exists() ) $raw = array( 'em'=>$u->user_email, 'fn'=>$u->first_name, 'ln'=>$u->last_name );
-		if ( function_exists( 'WC' ) && WC()->customer ) {
-			$c = WC()->customer;
+		$raw = array(); $u = self::visitor_user();
+		if ( $u ) $raw = array( 'em'=>$u->user_email, 'fn'=>$u->first_name, 'ln'=>$u->last_name );
+		if ( $c = self::wc_customer() ) {
 			$billing = array( 'em'=>$c->get_billing_email(), 'ph'=>$c->get_billing_phone(), 'fn'=>$c->get_billing_first_name(), 'ln'=>$c->get_billing_last_name(), 'ct'=>$c->get_billing_city(), 'st'=>$c->get_billing_state(), 'zp'=>$c->get_billing_postcode(), 'country'=>$c->get_billing_country() );
 			foreach ( $billing as $k=>$v ) if ( $v ) $raw[ $k ] = $v;
 		}
@@ -268,8 +342,28 @@ class DXPS_Helpers {
 
 	public static function user_data_current() {
 		$d = self::matching_hashes( self::user_data_plain() );
-		if ( is_user_logged_in() && self::marketing_allowed() ) $d = array_merge( $d, self::user_extra( get_current_user_id() ) );
+		if ( self::visitor_user_id() && self::marketing_allowed() ) $d = array_merge( $d, self::user_extra( self::visitor_user_id() ) );
 		return $d;
+	}
+
+	/**
+	 * 2.3.0: hashed matching data of one account (Login / CompleteRegistration): profile names and email plus the
+	 * saved WooCommerce billing address, and the Facebook Login ID when a social-login plugin stored one.
+	 */
+	public static function account_user_data( $user_id ) {
+		$user_id = (int) $user_id;
+		$u = $user_id ? get_userdata( $user_id ) : null;
+		if ( ! $u ) return array();
+		$raw = array_filter( array( 'em'=>$u->user_email, 'fn'=>$u->first_name, 'ln'=>$u->last_name ) );
+		if ( class_exists( 'WC_Customer' ) ) {
+			try {
+				$c = new WC_Customer( $user_id );
+				foreach ( array( 'em'=>$c->get_billing_email(), 'ph'=>$c->get_billing_phone(), 'fn'=>$c->get_billing_first_name(), 'ln'=>$c->get_billing_last_name(), 'ct'=>$c->get_billing_city(), 'st'=>$c->get_billing_state(), 'zp'=>$c->get_billing_postcode(), 'country'=>$c->get_billing_country() ) as $k => $v ) {
+					if ( $v && ( 'em' !== $k || empty( $raw['em'] ) ) ) $raw[ $k ] = $v; // the account email stays the primary one
+				}
+			} catch ( \Throwable $e ) {} // a missing customer record still leaves the profile data
+		}
+		return array_merge( self::matching_hashes( $raw ), self::user_extra( $user_id ) );
 	}
 
 	/** Traffic source classification from first-touch data + referrer. */
@@ -279,7 +373,9 @@ class DXPS_Helpers {
 			$src = (array) json_decode( urldecode( wp_unslash( $_COOKIE[ self::UTM_COOKIE ] ) ), true );
 		}
 		if ( ! empty( $src['utm_source'] ) ) return sanitize_text_field( $src['utm_source'] . ( empty( $src['utm_medium'] ) ? '' : ' / ' . $src['utm_medium'] ) );
-		if ( ! empty( $src['gclid'] ) )  return 'google / cpc';
+		if ( ! empty( $src['gclid'] ) || ! empty( $src['gbraid'] ) || ! empty( $src['wbraid'] ) ) return 'google / cpc';
+		if ( ! empty( $src['msclkid'] ) ) return 'bing / cpc';
+		if ( ! empty( $src['ttclid'] ) )  return 'tiktok / paid';
 		if ( ! empty( $src['fbclid'] ) ) return 'facebook / paid';
 		$ref = isset( $_SERVER['HTTP_REFERER'] ) ? wp_parse_url( $_SERVER['HTTP_REFERER'], PHP_URL_HOST ) : '';
 		if ( ! $ref || false !== strpos( (string) $ref, wp_parse_url( home_url(), PHP_URL_HOST ) ) ) return 'direct';
@@ -290,34 +386,95 @@ class DXPS_Helpers {
 
 	/* ---------------- First-party identifiers ---------------- */
 
+	/**
+	 * The Meta pixel hashes the browser ID before sending it, except when it already looks like a SHA-256
+	 * (64 hex characters, e.g. a cookie left by PixelYourSite) - then it is sent unchanged. Mirror that here,
+	 * otherwise browser and server would report two different external IDs for the same visitor.
+	 */
+	private static function eid_hash( $cookie ) {
+		$v = strtolower( $cookie );
+		return 64 === strlen( $v ) ? $v : hash( 'sha256', $v );
+	}
+
 	public static function external_id() {
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return strtolower( $_COOKIE[ $c ] );
+			if ( ! empty( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return self::eid_hash( $_COOKIE[ $c ] );
 		}
-		return is_user_logged_in() ? hash( 'sha256', 'dxps.user.' . get_current_user_id() ) : '';
+		return self::visitor_user_id() ? hash( 'sha256', 'dxps.user.' . self::visitor_user_id() ) : '';
 	}
 
 	/** Every external ID known for this visitor: browser ID cookie plus, when logged in, the account ID. */
 	public static function external_ids() {
 		$ids = array();
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = strtolower( $_COOKIE[ $c ] ); break; }
+			if ( ! empty( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = self::eid_hash( $_COOKIE[ $c ] ); break; }
 		}
-		if ( is_user_logged_in() ) $ids[] = hash( 'sha256', 'dxps.user.' . get_current_user_id() );
+		if ( self::visitor_user_id() ) $ids[] = hash( 'sha256', 'dxps.user.' . self::visitor_user_id() );
 		return array_values( array_unique( $ids ) );
 	}
 
-	/** How long hashed matching data is remembered per browser ID. Default 10 minutes; opt-in up to 180 days. */
+	/**
+	 * How long this browser keeps its hashed matching data (the _dxps_ud cookie), so a returning visitor's events
+	 * still carry it. Setting in days, up to 180; 0 = 10 minutes. Default 90 since 2.3.0.
+	 */
 	public static function retention() {
 		$days = max( 0, min( 180, (int) self::opt( 'am_retention_days', 0 ) ) );
 		return $days ? $days * DAY_IN_SECONDS : 10 * MINUTE_IN_SECONDS;
 	}
 
 	/**
-	 * WP-transient storage for external_id -> hashed customer data (10 minutes,
-	 * auto-expiring row in the database). Lets guests keep full Advanced
-	 * Matching data across requests (e.g. after entering checkout fields),
-	 * which lifts Meta EMQ on every event.
+	 * 2.3.0: the browser cookie is the long-term store; the server copy below is only a short cache (10 minutes),
+	 * so a 90-day retention does not leave one database row per visitor.
+	 */
+	public static function transient_ttl() {
+		return min( self::retention(), 10 * MINUTE_IN_SECONDS );
+	}
+
+	/** Hashed matching fields from this browser's _dxps_ud cookie (64-hex SHA-256 values only, nothing readable). */
+	public static function cookie_user_data() {
+		$v = $_COOKIE[ self::UD_COOKIE ] ?? '';
+		if ( ! is_string( $v ) || '' === $v || strlen( $v ) > 1200 || ! self::marketing_allowed() ) return array();
+		$raw = array();
+		foreach ( explode( '~', $v ) as $pair ) {
+			$p = explode( '.', $pair, 2 );
+			if ( 2 === count( $p ) && in_array( $p[0], self::MATCH_KEYS, true ) ) $raw[ $p[0] ] = $p[1];
+		}
+		return self::valid_user_data( $raw );
+	}
+
+	/** Cookie value for hashed matching fields: em.<sha256>~ph.<sha256>... (only characters allowed in cookies). */
+	public static function ud_cookie_value( $data ) {
+		$out = array();
+		foreach ( self::valid_user_data( array_intersect_key( (array) $data, array_flip( self::MATCH_KEYS ) ) ) as $k => $v ) $out[] = $k . '.' . $v;
+		return implode( '~', $out );
+	}
+
+	/**
+	 * Keep the browser's _dxps_ud cookie in step with what the server knows (logged-in account, checkout billing).
+	 * Must run before output. A different email means a different person: the old fields are replaced, not merged.
+	 */
+	public static function sync_ud_cookie( $data ) {
+		if ( headers_sent() || ! self::on( 'auto_am' ) ) return;
+		if ( ! self::marketing_allowed() ) {
+			if ( isset( $_COOKIE[ self::UD_COOKIE ] ) ) {
+				setcookie( self::UD_COOKIE, '', array( 'expires' => time() - 3600, 'path' => '/', 'secure' => is_ssl(), 'httponly' => false, 'samesite' => 'Lax' ) );
+				unset( $_COOKIE[ self::UD_COOKIE ] );
+			}
+			return;
+		}
+		$data = array_intersect_key( self::valid_user_data( (array) $data ), array_flip( self::MATCH_KEYS ) );
+		if ( ! $data ) return;
+		$old = self::cookie_user_data();
+		if ( ! empty( $old['em'] ) && ! empty( $data['em'] ) && $old['em'] !== $data['em'] ) $old = array();
+		$value = self::ud_cookie_value( array_merge( $old, $data ) );
+		if ( '' === $value || ( $_COOKIE[ self::UD_COOKIE ] ?? '' ) === $value ) return;
+		setcookie( self::UD_COOKIE, $value, array( 'expires' => time() + self::retention(), 'path' => '/', 'secure' => is_ssl(), 'httponly' => false, 'samesite' => 'Lax' ) );
+		$_COOKIE[ self::UD_COOKIE ] = $value;
+	}
+
+	/**
+	 * WP-transient storage for external_id -> hashed customer data: a short server-side cache (transient_ttl()),
+	 * so the events of the same visit carry what was typed a moment ago even before the browser cookie is sent.
 	 */
 	public static function remember_user_data( $data ) {
 		$eid = self::external_id();
@@ -325,7 +482,7 @@ class DXPS_Helpers {
 		$data = self::valid_user_data( $data );
 		unset( $data['client_ip_address'], $data['client_user_agent'], $data['fbp'], $data['fbc'], $data['external_id'] ); // matching hashes only
 		if ( ! $data ) return;
-		set_transient( 'dxps_eid_' . substr( $eid, 0, 32 ), $data, self::retention() );
+		set_transient( 'dxps_eid_' . substr( $eid, 0, 32 ), $data, self::transient_ttl() );
 	}
 
 	public static function recalled_user_data() {
@@ -336,13 +493,21 @@ class DXPS_Helpers {
 		return is_array( $d ) ? self::valid_user_data( $d ) : array();
 	}
 
-	/** Full user data: live sources merged with the 10-minute transient recall. */
+	/**
+	 * Full user data. Priority, highest first: live (account / WooCommerce customer) > server cache > the browser's
+	 * _dxps_ud cookie. A lower layer whose email differs from a higher one belongs to another person and is dropped.
+	 */
 	public static function user_data_full() {
 		$live = self::user_data_current();
 		$remembered = self::recalled_user_data();
 		if ( ! empty( $remembered['em'] ) && ! empty( $live['em'] ) && $remembered['em'] !== $live['em'] ) $remembered = array();
 		$data = array_merge( $remembered, $live );
-		if ( $live ) self::remember_user_data( $data );
+		if ( $live && $data != $remembered ) self::remember_user_data( $data );
+		$browser = self::cookie_user_data();
+		if ( $browser && ! ( ! empty( $browser['em'] ) && ! empty( $data['em'] ) && $browser['em'] !== $data['em'] ) ) $data = array_merge( $browser, $data );
+		// 2.4.0: for a visitor who has given nothing, WooCommerce's "country" is only the store's default customer
+		// location. The visitor's real (Cloudflare) country is better then; the relay adds it as the lowest layer.
+		if ( isset( $data['country'] ) && ! array_intersect_key( $data, array_flip( array( 'em','ph','fn','ln' ) ) ) && isset( self::geo_hashes()['country'] ) ) unset( $data['country'] );
 		return $data;
 	}
 
@@ -351,11 +516,23 @@ class DXPS_Helpers {
 	public static function fbc() {
 		$v = isset( $_COOKIE['_fbc'] ) && is_string( $_COOKIE['_fbc'] ) ? $_COOKIE['_fbc'] : '';
 		// A new ad click (a different fbclid) replaces the stored click ID - Meta attributes to the latest click.
-		if ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $_GET['fbclid'] ) ) {
-			$suffix = '.' . $_GET['fbclid'];
+		$click = ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) ) ? $_GET['fbclid'] : self::referrer_fbclid();
+		if ( $click && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $click ) ) {
+			$suffix = '.' . $click;
 			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.1.' . round( microtime( true ) * 1000 ) . $suffix;
 		}
 		return self::valid_user_data( array( 'fbc'=>$v ) )['fbc'] ?? '';
+	}
+
+	/**
+	 * 2.3.1: the ad click ID from the previous page of this site (Referer), for visits where the landing page could
+	 * not store it (consent given on the second page, or a script redirect that dropped the query string).
+	 */
+	public static function referrer_fbclid() {
+		$ref = isset( $_SERVER['HTTP_REFERER'] ) && is_string( $_SERVER['HTTP_REFERER'] ) ? $_SERVER['HTTP_REFERER'] : '';
+		if ( '' === $ref || ! self::same_site_origin( $ref ) ) return '';
+		parse_str( (string) wp_parse_url( $ref, PHP_URL_QUERY ), $q );
+		return isset( $q['fbclid'] ) && is_string( $q['fbclid'] ) ? $q['fbclid'] : '';
 	}
 
 	public static function ga_client_id() {
@@ -376,31 +553,54 @@ class DXPS_Helpers {
 		return (string) $product->get_id();
 	}
 
+	/** A descriptive label, or '' when it would reveal a health condition (never sent to any platform). */
+	public static function safe_label( $text ) {
+		$text = trim( wp_strip_all_tags( (string) $text ) );
+		return ( '' === $text || self::sensitive_context( '', array( $text ) ) ) ? '' : $text;
+	}
+
+	/** Brand for product events: the product's own catalogue brand, else the configured store brand. */
+	public static function item_brand( $product, $parent_id = 0 ) {
+		if ( ! self::on( 'track_brand' ) ) return '';
+		$brand = $product ? (string) $product->get_meta( '_dxps_brand' ) : '';
+		if ( '' === $brand && $parent_id && function_exists( 'wc_get_product' ) && ( $parent = wc_get_product( $parent_id ) ) ) $brand = (string) $parent->get_meta( '_dxps_brand' );
+		return self::safe_label( '' !== $brand ? $brand : self::opt( 'brand_name', 'Eynna Hair' ) );
+	}
+
+	/** First product category of the (parent) product. Variations have no categories of their own. */
+	private static function item_category( $product_id ) {
+		$cats = wc_get_product_terms( $product_id, 'product_cat', array( 'fields' => 'names' ) );
+		return ( is_wp_error( $cats ) || ! $cats ) ? '' : self::safe_label( $cats[0] );
+	}
+
 	public static function product_item( $product, $qty = 1 ) {
 		if ( ! $product instanceof WC_Product ) return null;
-		$cats = wc_get_product_terms( $product->get_id(), 'product_cat', array( 'fields' => 'names' ) );
-		return array(
+		$parent_id = $product->is_type( 'variation' ) ? $product->get_parent_id() : 0;
+		return array_filter( array(
 			'id'       => self::pid( $product ),
-			'brand'    => self::on( 'track_brand' ) ? self::opt( 'brand_name', 'Eynna Hair' ) : '',
+			'content_type' => $product->is_type( 'variable' ) ? 'product_group' : 'product',
+			'brand'    => self::item_brand( $product, $parent_id ),
 			'name'     => $product->get_name(),
 			'price'    => (float) wc_get_price_to_display( $product ),
 			'quantity' => (int) $qty,
-			'category' => $cats ? $cats[0] : '',
-		);
+			'category' => self::item_category( $parent_id ?: $product->get_id() ),
+			'variant'  => $parent_id ? self::safe_label( wc_get_formatted_variation( $product, true, false, false ) ) : '',
+		), function ( $v ) { return '' !== $v; } );
 	}
 
 	public static function order_items( $order ) {
 		$items = array();
 		foreach ( $order->get_items() as $it ) {
 			$p = $it->get_product();
-			$items[] = array(
+			$items[] = array_filter( array(
 				'id'       => $p ? self::pid( $p ) : (string) $it->get_product_id(),
-				'brand'    => self::on( 'track_brand' ) ? self::opt( 'brand_name', 'Eynna Hair' ) : '',
+				'brand'    => self::item_brand( $p, $it->get_variation_id() ? $it->get_product_id() : 0 ),
 				'name'     => $it->get_name(),
 				'price'    => (float) $order->get_item_total( $it, true ),
 				'quantity' => (int) $it->get_quantity(),
-				'category' => '',
-			);
+				'category' => $it->get_product_id() ? self::item_category( $it->get_product_id() ) : '',
+				'variant'  => ( $p && $p->is_type( 'variation' ) ) ? self::safe_label( wc_get_formatted_variation( $p, true, false, false ) ) : '',
+			), function ( $v ) { return '' !== $v; } );
 		}
 		return $items;
 	}
@@ -443,17 +643,18 @@ class DXPS_Helpers {
 			'coupon_name'        => implode( ',', $safe_coupons ),
 			'tags'               => implode( ', ', array_slice( array_unique( $tags ), 0, 10 ) ),
 			'payment_method'     => $order->get_payment_method_title(),
+			'discount'           => (float) $order->get_discount_total(),
 		);
 	}
 
 	/* ---------------- Per-pageload event queue (session) ---------------- */
 
 	public static function queue_event( $name, $params ) {
-		if ( self::excluded_role() ) return;
+		if ( self::excluded_role() || ! self::marketing_allowed() ) return;
 		if ( function_exists( 'WC' ) && WC()->session ) {
 			$q   = WC()->session->get( 'dxps_queue', array() );
 			$q[] = array( 'name' => $name, 'params' => $params, 'event_id' => self::event_id( $name ) );
-			WC()->session->set( 'dxps_queue', $q );
+			WC()->session->set( 'dxps_queue', array_slice( $q, -30 ) );
 		}
 	}
 
@@ -479,15 +680,69 @@ class DXPS_Helpers {
 	public static function geo_hashes() {
 		$mode = (string) self::opt( 'geo_enrich' );
 		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
-		$raw = array();
-		$c = self::country();
-		if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
-		if ( 'full' === $mode ) {
-			foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
-				if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
+		$raw    = array();
+		$source = self::geo_source();
+		if ( 'cloudflare' === $source || 'cloudflare_restored' === $source || 'filter' === $source ) {
+			// Cloudflare's visitor-location headers. Believed only when the request really came through Cloudflare
+			// (edge address, or the visitor address the host restored from it), or a developer filter says so.
+			$c = self::country();
+			if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
+			if ( 'full' === $mode ) {
+				foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
+					if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
+				}
 			}
+		} elseif ( 'maxmind' === $source ) {
+			$raw = self::maxmind_location();
+			if ( 'full' !== $mode ) $raw = array_intersect_key( $raw, array( 'country' => 1 ) );
 		}
 		return $raw ? self::matching_hashes( $raw ) : array();
+	}
+
+	/**
+	 * 2.4.1: where the visitor's approximate location comes from.
+	 *   cloudflare           request from a Cloudflare edge address
+	 *   cloudflare_restored  host restored the visitor address from Cloudflare (CF-Ray present, CF-Connecting-IP = REMOTE_ADDR)
+	 *   filter               dxps_trust_proxy_headers filter
+	 *   maxmind              WooCommerce MaxMind geolocation database installed
+	 *   none
+	 */
+	public static function geo_source() {
+		$setup = self::ip_setup();
+		if ( 'cloudflare' === $setup || 'cloudflare_restored' === $setup ) return $setup;
+		if ( apply_filters( 'dxps_trust_proxy_headers', false ) ) return 'filter';
+		if ( self::maxmind_available() ) return 'maxmind';
+		return 'none';
+	}
+
+	/** WooCommerce's MaxMind GeoLite2 database is set up (WooCommerce → Settings → Integration → MaxMind). */
+	public static function maxmind_available() {
+		if ( ! class_exists( 'WC_Geolocation' ) || ! method_exists( 'WC_Geolocation', 'geolocate_ip' ) ) return false;
+		$integration = class_exists( 'WC_Integration_MaxMind_Geolocation' ) ? get_option( 'woocommerce_maxmind_geolocation_settings', array() ) : array();
+		return is_array( $integration ) && ! empty( $integration['license_key'] );
+	}
+
+	/**
+	 * Country / region / city / postcode from WooCommerce's MaxMind database for the visitor IP (local lookup, no
+	 * outside service). Cached per IP for a day.
+	 */
+	public static function maxmind_location() {
+		$ip = self::client_ip();
+		if ( ! $ip || ! self::public_ip( $ip ) ) return array();
+		$key = 'dxps_geo_' . md5( $ip );
+		$hit = get_transient( $key );
+		if ( is_array( $hit ) ) return $hit;
+		$out = array();
+		try {
+			$geo = WC_Geolocation::geolocate_ip( $ip, false, false );
+			foreach ( array( 'country' => 'country', 'st' => 'state', 'ct' => 'city', 'zp' => 'postcode' ) as $k => $g ) {
+				if ( ! empty( $geo[ $g ] ) && is_string( $geo[ $g ] ) ) $out[ $k ] = sanitize_text_field( $geo[ $g ] );
+			}
+		} catch ( \Throwable $e ) {
+			$out = array();
+		}
+		set_transient( $key, $out, DAY_IN_SECONDS );
+		return $out;
 	}
 
 	/** Post types selected for content tracking. */
@@ -558,8 +813,8 @@ class DXPS_Helpers {
 	/** True when the logged-in user has a role excluded from tracking (staff, test accounts). */
 	public static function excluded_role() {
 		$roles = array_filter( array_map( 'sanitize_key', explode( ',', (string) self::opt( 'exclude_roles' ) ) ) );
-		if ( ! $roles || ! is_user_logged_in() ) return false;
-		$u = wp_get_current_user();
+		if ( ! $roles || ! self::visitor_user_id() ) return false;
+		$u = self::visitor_user();
 		return $u && array_intersect( $roles, (array) $u->roles ) ? true : false;
 	}
 
@@ -645,4 +900,178 @@ class DXPS_Helpers {
 			error_log( $line );
 		}
 	}
+	/**
+	 * The visitor's IP address for Meta / GA4 matching.
+	 *
+	 * 2.3.0: behind Cloudflare, REMOTE_ADDR is a Cloudflare edge server unless the host restores visitor addresses,
+	 * so every server event used to carry Cloudflare's IP instead of the customer's. Forwarding headers are only
+	 * believed when the request really came from a proxy (a Cloudflare edge address, or a private / local address
+	 * of the host's own load balancer); on a direct request anyone could forge them.
+	 */
+	public static function client_ip() {
+		$remote = isset( $_SERVER['REMOTE_ADDR'] ) && is_string( $_SERVER['REMOTE_ADDR'] ) ? trim( $_SERVER['REMOTE_ADDR'] ) : '';
+		$ip     = filter_var( $remote, FILTER_VALIDATE_IP ) ? $remote : '';
+		if ( $ip ) {
+			$cf_ranges = (array) apply_filters( 'dxps_cloudflare_ranges', self::CF_RANGES );
+			$cf_header = self::public_ip( $_SERVER['HTTP_CF_CONNECTING_IP'] ?? '' );
+			if ( self::ip_in_ranges( $ip, $cf_ranges ) ) {
+				if ( $cf_header ) $ip = $cf_header;
+			} elseif ( ! self::public_ip( $ip ) ) {
+				// Local reverse proxy / load balancer: walk X-Forwarded-For from the right (the entries our own proxies
+				// added), skipping private hops and Cloudflare edges; the first other address is the visitor.
+				$via_cf = false; $found = '';
+				$chain = isset( $_SERVER['HTTP_X_FORWARDED_FOR'] ) && is_string( $_SERVER['HTTP_X_FORWARDED_FOR'] ) ? array_reverse( array_map( 'trim', explode( ',', $_SERVER['HTTP_X_FORWARDED_FOR'] ) ) ) : array();
+				foreach ( array_slice( $chain, 0, 10 ) as $hop ) {
+					if ( ! filter_var( $hop, FILTER_VALIDATE_IP ) || ! self::public_ip( $hop ) ) continue;
+					if ( self::ip_in_ranges( $hop, $cf_ranges ) ) { $via_cf = true; continue; }
+					$found = $hop; break;
+				}
+				if ( $via_cf && $cf_header ) $found = $cf_header;
+				if ( ! $found ) $found = $cf_header ?: self::public_ip( $_SERVER['HTTP_X_REAL_IP'] ?? '' );
+				if ( $found ) $ip = $found;
+			}
+		}
+		// 2.3.1: the browser's own IPv6 address (looked up by the browser after consent, cookie _dxps_ip), used only
+		// when this connection is IPv4: Meta prefers IPv6 and compares it with what the pixel sees. A visitor can only
+		// change the address on their own events, so the value is checked for format, never trusted for anything else.
+		if ( $ip && filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 ) && self::on( 'ip6_lookup' ) && self::marketing_allowed() ) {
+			$v6 = self::browser_ipv6();
+			if ( $v6 ) $ip = $v6;
+		}
+		// A proxy integration can still override the result explicitly.
+		$ip = apply_filters( 'dxps_client_ip', $ip );
+		return is_string( $ip ) && filter_var( $ip, FILTER_VALIDATE_IP ) ? $ip : '';
+	}
+
+	/** The visitor's public IPv6 address from the _dxps_ip cookie (written by the browser), or ''. */
+	public static function browser_ipv6() {
+		$v = isset( $_COOKIE['_dxps_ip'] ) && is_string( $_COOKIE['_dxps_ip'] ) ? trim( rawurldecode( $_COOKIE['_dxps_ip'] ) ) : '';
+		if ( '' === $v || strlen( $v ) > 45 || ! filter_var( $v, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6 ) ) return '';
+		return self::public_ip( $v );
+	}
+
+	/** The address if it is a valid public (not private / reserved) IP, else ''. */
+	public static function public_ip( $ip ) {
+		$ip = is_string( $ip ) ? trim( $ip ) : '';
+		return filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ? $ip : '';
+	}
+
+	/** Whether an IPv4 / IPv6 address lies inside one of the CIDR ranges. */
+	public static function ip_in_ranges( $ip, $ranges ) {
+		$bin = @inet_pton( (string) $ip );
+		if ( false === $bin ) return false;
+		foreach ( $ranges as $range ) {
+			$parts = explode( '/', (string) $range, 2 );
+			$net   = @inet_pton( $parts[0] );
+			if ( false === $net || strlen( $net ) !== strlen( $bin ) ) continue;
+			$bits = isset( $parts[1] ) ? (int) $parts[1] : strlen( $bin ) * 8;
+			$bytes = intdiv( $bits, 8 ); $rest = $bits % 8;
+			if ( $bytes && substr( $bin, 0, $bytes ) !== substr( $net, 0, $bytes ) ) continue;
+			if ( $rest ) {
+				$mask = chr( ( 0xff << ( 8 - $rest ) ) & 0xff );
+				if ( ( $bin[ $bytes ] & $mask ) !== ( $net[ $bytes ] & $mask ) ) continue;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * 2.3.1: whether a request Origin / Referer belongs to this site. www and the bare domain count as one site, and
+	 * an https site also accepts its own http pages; any other host, or a different port, does not.
+	 */
+	public static function same_site_origin( $origin ) {
+		$src = wp_parse_url( (string) $origin );
+		$dst = wp_parse_url( home_url() );
+		if ( ! is_array( $src ) || empty( $src['host'] ) || ! is_array( $dst ) || empty( $dst['host'] ) ) return false;
+		$bare = function ( $h ) { return preg_replace( '/^www\./', '', strtolower( (string) $h ) ); };
+		if ( $bare( $src['host'] ) !== $bare( $dst['host'] ) ) return false;
+		$s_scheme = strtolower( $src['scheme'] ?? '' ); $d_scheme = strtolower( $dst['scheme'] ?? '' );
+		if ( ! in_array( $s_scheme, array( 'http', 'https' ), true ) ) return false;
+		if ( $s_scheme !== $d_scheme && ! ( 'https' === $d_scheme && 'http' === $s_scheme ) ) return false;
+		if ( $s_scheme !== $d_scheme ) return ! isset( $src['port'] ) && ! isset( $dst['port'] ); // http page of an https site, default ports only
+		$port = function ( $u, $scheme ) { return (int) ( $u['port'] ?? ( 'https' === $scheme ? 443 : 80 ) ); };
+		return $port( $src, $s_scheme ) === $port( $dst, $d_scheme );
+	}
+
+	/**
+	 * 2.3.1: relay delivery counters for Diagnostics (today and the previous days, 14 days kept). Reasons a request
+	 * was refused (origin, rate, bot, size, consent, sensitive), plus sent / meta_error. Counts only, never visitor data.
+	 * Successful sends are counted only while the event log is on, so normal traffic adds no database write.
+	 */
+	public static function count_relay( $reason, $n = 1 ) {
+		if ( 0 === strpos( (string) $reason, 'sent' ) && ! self::on( 'event_log' ) ) return;
+		$stats = get_option( 'dxps_relay_stats', array() );
+		if ( ! is_array( $stats ) ) $stats = array();
+		$day = gmdate( 'Y-m-d' );
+		if ( (int) ( $stats[ $day ][ $reason ] ?? 0 ) >= 10000 ) return; // bounded: a flood cannot keep writing
+		$stats[ $day ][ $reason ] = (int) ( $stats[ $day ][ $reason ] ?? 0 ) + max( 1, (int) $n );
+		ksort( $stats );
+		update_option( 'dxps_relay_stats', array_slice( $stats, -14, null, true ), false );
+	}
+
+	/** Relay counters summed over the last $days days. */
+	public static function relay_stats( $days = 7 ) {
+		$stats = get_option( 'dxps_relay_stats', array() );
+		$out = array();
+		foreach ( is_array( $stats ) ? array_slice( $stats, -$days, null, true ) : array() as $row ) {
+			foreach ( (array) $row as $k => $v ) $out[ $k ] = ( $out[ $k ] ?? 0 ) + (int) $v;
+		}
+		return $out;
+	}
+
+	/**
+	 * 2.4.0: signed recognition token for links in a customer's WooCommerce emails: order_id.expiry.signature.
+	 * Carries no personal data; the signature (HMAC-SHA256 with the site's auth salt) stops anyone from making one.
+	 */
+	public static function identity_token( $order_id, $ttl = 0 ) {
+		$payload = (int) $order_id . '.' . ( time() + ( $ttl ? (int) $ttl : 90 * DAY_IN_SECONDS ) );
+		return $payload . '.' . substr( hash_hmac( 'sha256', 'dxps-id|' . $payload, wp_salt( 'auth' ) ), 0, 32 );
+	}
+
+	/** Order ID of a valid, unexpired recognition token, else 0. */
+	public static function identity_order_id( $token ) {
+		if ( ! is_string( $token ) || ! preg_match( '/^([0-9]{1,12})\.([0-9]{10})\.([a-f0-9]{32})$/', $token, $m ) ) return 0;
+		if ( (int) $m[2] < time() ) return 0;
+		$expect = substr( hash_hmac( 'sha256', 'dxps-id|' . $m[1] . '.' . $m[2], wp_salt( 'auth' ) ), 0, 32 );
+		return hash_equals( $expect, $m[3] ) ? (int) $m[1] : 0;
+	}
+
+	/** Diagnostics: how the visitor IP is being resolved on this server. */
+	public static function ip_setup() {
+		$remote = $_SERVER['REMOTE_ADDR'] ?? '';
+		if ( self::ip_in_ranges( $remote, (array) apply_filters( 'dxps_cloudflare_ranges', self::CF_RANGES ) ) ) return 'cloudflare';
+		// 2.4.1: host in front of PHP already replaced the connection address with Cloudflare's visitor address.
+		$cf = isset( $_SERVER['HTTP_CF_CONNECTING_IP'] ) && is_string( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ? trim( $_SERVER['HTTP_CF_CONNECTING_IP'] ) : '';
+		if ( ! empty( $_SERVER['HTTP_CF_RAY'] ) && $cf && self::public_ip( $cf ) && $cf === $remote ) return 'cloudflare_restored';
+		if ( filter_var( $remote, FILTER_VALIDATE_IP ) && ! self::public_ip( $remote ) ) return 'proxy';
+		return 'direct';
+	}
+	public static function google_email( $email ) {
+		$email = strtolower( trim( (string) $email ) );
+		if ( ! is_email( $email ) ) return '';
+		list( $local, $domain ) = explode( '@', $email, 2 );
+		if ( in_array( $domain, array( 'gmail.com','googlemail.com' ), true ) ) $local = str_replace( '.', '', $local );
+		return $local . '@' . $domain;
+	}
+	public static function google_user_from_order( $order ) {
+		$email = self::google_email( $order->get_billing_email() );
+		$phone = self::norm_phone( $order->get_billing_phone(), $order->get_billing_country() );
+		$address = array_filter( array(
+			'sha256_first_name'=>self::hash( $order->get_billing_first_name() ),
+			'sha256_last_name'=>self::hash( $order->get_billing_last_name() ),
+			'sha256_street'=>self::hash( trim( $order->get_billing_address_1() . ' ' . $order->get_billing_address_2() ) ),
+			'city'=>$order->get_billing_city(), 'region'=>$order->get_billing_state(),
+			'postal_code'=>$order->get_billing_postcode(), 'country'=>strtoupper( $order->get_billing_country() ),
+		) );
+		return array_filter( array( 'sha256_email_address'=>$email ? hash( 'sha256', $email ) : '', 'sha256_phone_number'=>$phone ? hash( 'sha256', $phone ) : '', 'address'=>$address ) );
+	}
+	public static function ga_session_id() {
+		$id = preg_replace( '/^G-/', '', (string) self::opt( 'ga4_id' ) );
+		$c = $_COOKIE['_ga_' . $id] ?? '';
+		if ( ! is_string( $c ) ) return '';
+		if ( preg_match( '/^GS1\.\d\.(\d+)/', $c, $m ) || preg_match( '/^GS2\.\d\.s(\d+)/', $c, $m ) ) return $m[1];
+		return '';
+	}
+
 }

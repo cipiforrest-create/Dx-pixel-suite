@@ -9,12 +9,12 @@ class DXPS_Settings {
 	/** field => tab registry: text fields and checkbox fields per tab (prevents cross-tab wipes on save). */
 	private static $tabs = array(
 		'platforms' => array(
-			'text' => array( 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'ga4_id', 'ga4_api_secret', 'gads_conversion_id', 'gads_purchase_label', 'gads_lead_label', 'gtm_id' ),
-			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu' ),
+			'text' => array( 'meta_pixel_id', 'meta_capi_token', 'meta_test_code', 'ga4_id', 'ga4_api_secret', 'gads_conversion_id', 'gads_purchase_label', 'gads_lead_label', 'gtm_id', 'gads_merchant_id', 'gads_feed_country', 'gads_feed_language' ),
+			'bool' => array( 'meta_enabled', 'ga4_enabled', 'gads_enabled', 'gads_enhanced', 'gtm_enabled', 'gtm_only', 'engine_direct', 'ga4_server_purchase', 'meta_ldu', 'gads_remarketing', 'ga4_page_titles' ),
 		),
 		'events' => array(
-			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich' ),
-			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged' ),
+			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich', 'ip6_url' ),
+			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged', 'ip6_lookup', 'param_builder', 'email_identity' ),
 		),
 		'consent' => array(
 			'text' => array(),
@@ -74,6 +74,9 @@ class DXPS_Settings {
 			$o['content_read_scroll'] = max( 10, min( 100, absint( $o['content_read_scroll'] ?: 50 ) ) );
 			$o['content_read_time']   = max( 5, min( 600, absint( $o['content_read_time'] ?: 30 ) ) );
 			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full' ), true ) ? $o['geo_enrich'] : '';
+			// 2.3.1: IPv6 lookup service: an https address only; empty falls back to the default.
+			$ip6 = esc_url_raw( (string) ( $o['ip6_url'] ?? '' ), array( 'https' ) );
+			$o['ip6_url'] = $ip6 ? $ip6 : 'https://api64.ipify.org';
 		}
 		update_option( 'dxps_settings', $o );
 		// Post/Redirect/Get: DXPS_Helpers::opt() caches the options for the request, so rendering the form in
@@ -114,14 +117,16 @@ class DXPS_Settings {
 	}
 
 	public static function page() {
+		if ( ! current_user_can( 'manage_options' ) ) return;
 		$tab = sanitize_key( $_GET['tab'] ?? 'platforms' );
 		echo '<div class="wrap"><h1>DX Pixel Suite <small style="font-weight:normal">v' . esc_html( DXPS_VERSION ) . '</small></h1><nav class="nav-tab-wrapper">';
-		foreach ( array( 'platforms' => 'Platforms', 'events' => 'Events & Parameters', 'consent' => 'Consent & Privacy', 'diagnostics' => 'Diagnostics', 'recommended' => '✓ Recommended setup' ) as $k => $l ) {
+		foreach ( array( 'platforms' => 'Platforms', 'events' => 'Events & Parameters', 'consent' => 'Consent & Privacy', 'feeds' => 'Product Feeds', 'diagnostics' => 'Diagnostics', 'recommended' => '✓ Recommended setup' ) as $k => $l ) {
 			echo '<a class="nav-tab ' . ( $tab === $k ? 'nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=dx-pixel-suite&tab=' . $k ) ) . '">' . esc_html( $l ) . '</a>';
 		}
 		echo '</nav>';
 		self::conflict_notice();
 		if ( ! empty( $_GET['dxps_saved'] ) ) echo '<div class="notice notice-success is-dismissible"><p>DX Pixel Suite settings saved.</p></div>';
+		if ( 'feeds' === $tab ) { DXPS_Feeds_Admin::page(); echo '</div>'; return; }
 		if ( 'recommended' === $tab ) { self::tab_recommended(); echo '</div>'; return; }
 		if ( 'diagnostics' === $tab ) { self::tab_diagnostics(); echo '</div>'; return; }
 
@@ -148,19 +153,23 @@ class DXPS_Settings {
 		echo '<tr><th></th><td>'; self::c( 'ga4_enabled', 'Enable GA4 (browser tag + server Measurement Protocol)' ); echo '</td></tr>';
 		echo '<tr><th>Measurement ID</th><td>'; self::f( 'ga4_id', 'G-XXXXXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th>MP API secret</th><td>'; self::f( 'ga4_api_secret' ); echo '<p class="description">GA4 Admin → Data streams → stream → Measurement Protocol API secrets.</p></td></tr>';
+		echo '<tr><th>Page titles</th><td>'; self::c( 'ga4_page_titles', 'Send real page titles to GA4', 'Off: GA4 receives a generic title and you report by page path. On: the browser title is sent, as a standard GA4 setup does. Pages with health-related wording are never tracked either way. Campaign parameters (utm_*, gclid, gbraid, wbraid, msclkid) are always kept in the page address so GA4 can attribute sessions; every other URL parameter is removed.' ); echo '</td></tr>';
 		echo '</table><h2>Google Ads</h2><table class="form-table">';
 		echo '<tr><th></th><td>'; self::c( 'gads_enabled', 'Enable Google Ads conversion tracking' ); echo '</td></tr>';
 		echo '<tr><th>Conversion ID</th><td>'; self::f( 'gads_conversion_id', 'AW-XXXXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th>Purchase label</th><td>'; self::f( 'gads_purchase_label' ); echo '</td></tr>';
 		echo '<tr><th>Lead label</th><td>'; self::f( 'gads_lead_label' ); echo '<p class="description">Optional — WhatsApp/phone/email clicks as a secondary conversion.</p></td></tr>';
 		echo '<tr><th></th><td>'; self::c( 'gads_enhanced', 'Enhanced Conversions (hashed billing data with purchases)' ); echo '</td></tr>';
+		echo '<tr><th>Merchant Center ID</th><td>'; self::f( 'gads_merchant_id', '123456789' ); echo '<p class="description">Optional. Adds cart data to the purchase conversion (product IDs, quantities, prices), so Google Ads can report and optimise Shopping / Performance Max per product. Use the Merchant Center account that fetches your DX Google feed. The purchased product IDs are sent with the conversion even without it.</p></td></tr>';
+		echo '<tr><th>Feed country / language</th><td><input name="gads_feed_country" size="4" maxlength="2" placeholder="BA" value="' . esc_attr( DXPS_Helpers::opt( 'gads_feed_country' ) ) . '"> <input name="gads_feed_language" size="4" maxlength="2" placeholder="BS" value="' . esc_attr( DXPS_Helpers::opt( 'gads_feed_language' ) ) . '"><p class="description">Two-letter codes of the Merchant Center feed, e.g. BA and BS. Leave empty if unsure.</p></td></tr>';
+		echo '<tr><th>Dynamic remarketing</th><td>'; self::c( 'gads_remarketing', 'Send product views, cart and checkout events to Google Ads', 'Builds retail remarketing audiences and powers catalogue ads from the same product IDs as your feed. Off by default: personalised advertising is restricted for some product categories (for example health-related ones) - check Google Ads policy for your catalogue before enabling. Needs Google Ads enabled above; not used in GTM-only mode.' ); echo '</td></tr>';
 		echo '</table><h2>Google Tag Manager</h2><table class="form-table">';
 		echo '<tr><th></th><td>'; self::c( 'gtm_enabled', 'Enable GTM container' ); echo '</td></tr>';
 		echo '<tr><th>Container ID</th><td>'; self::f( 'gtm_id', 'GTM-XXXXXXX' ); echo '</td></tr>';
 		echo '<tr><th></th><td>'; self::c( 'gtm_only', 'GTM-only mode', 'Push dataLayer events only; do not load direct GA4/Ads tags (avoids double-tracking if your container fires them).' ); echo '</td></tr>';
 		echo '</table><h2>Direct Google mode (replaces GTM)</h2><table class="form-table">';
-		echo '<tr><th></th><td>'; self::c( 'engine_direct', 'Run the enriched event engine inside DX (no GTM needed)', 'Sends the same GA4 events and parameters as the GTM container (view_item, add_to_cart, page_scroll, contact_click, purchase …) plus the eh_ads_* Google Ads events straight from DX. Works only while "Enable GTM container" above is OFF; needs GA4 (and optionally Google Ads) enabled with IDs filled in.' ); echo '</td></tr>';
-		echo '<tr><th></th><td>'; self::c( 'ga4_server_purchase', 'Also send purchase / refund through GA4 Measurement Protocol', 'Optional server-side backup in Direct Google mode (GA4 de-duplicates by transaction ID). Other events are never mirrored to GA4 server-side in this mode, to avoid double counting.' ); echo '</td></tr>';
+		echo '<tr><th></th><td>'; self::c( 'engine_direct', 'Use the direct Google dispatcher', 'One sender for DX events, using WooCommerce product IDs and prices. Works while GTM is off. No DOM price scraping or inferred customer segments.' ); echo '</td></tr>';
+		echo '<tr><th></th><td>'; self::c( 'ga4_server_purchase', 'Use GA4 server delivery for thank-you purchases', 'When enabled, DX suppresses its browser GA4 purchase. Status-triggered purchases and refunds always use the server. Requires a Measurement Protocol secret. Disable any duplicate purchase tags in GTM.' ); echo '</td></tr>';
 		if ( DXPS_Helpers::on( 'engine_direct' ) ) {
 			echo '<tr><th>Status</th><td><strong>' . ( DXPS_Helpers::engine_direct() ? 'Active' : 'Not active' ) . '</strong>' . ( DXPS_Helpers::engine_direct() ? '' : ' - turn GTM off and enable GA4 and/or Google Ads with their IDs.' ) . '</td></tr>';
 		}
@@ -183,7 +192,7 @@ class DXPS_Settings {
 		}
 		echo '</select><p class="description">The value sent with Purchase to every platform. Choose the net option to optimise ads on what you actually receive.</p></td></tr>';
 		echo '</table><h2>Events</h2><table class="form-table">';
-		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror browser events through Meta CAPI + GA4 MP', 'First-party, deduplicated by event_id — recovers ad-blocker/iOS losses. Relayed events carry the validated, hashed customer data that is actually available (email, phone, name, city, state, ZIP, country, external ID, Facebook Login ID). Date of birth and gender are never inferred or sent.' ); echo '</td></tr>';
+		echo '<tr><th>Server relay</th><td>'; self::c( 'server_relay', 'Mirror consented browser events through Meta CAPI', 'Meta browser/server copies share an event ID. GA4 browser events are not mirrored; server purchases, refunds and account events have one delivery owner.' ); echo '</td></tr>';
 		echo '<tr><th>Leads</th><td>'; self::c( 'track_leads', 'WhatsApp / phone / email clicks → Lead' ); echo '</td></tr>';
 		echo '<tr><th>Search</th><td>'; self::c( 'track_search', 'Site search → Search' ); echo '</td></tr>';
 		echo '<tr><th>PageScroll</th><td>'; self::c( 'track_scroll', 'Scroll depth at 25 / 50 / 75 / 90% → PageScroll (Meta) + scroll (GA4)', 'Great for engaged-visitor custom audiences.' ); echo '</td></tr>';
@@ -203,15 +212,19 @@ class DXPS_Settings {
 		echo '<p class="description" style="margin-top:6px"><strong>Never captured:</strong> passwords, payment card numbers, CVV/CVC, IBAN. Add <code>data-dxps-ignore</code> to any other field you want excluded. Matching fields are validated, normalized and SHA-256 hashed before the first-party form-ingest request. Only matching hashes are retained briefly. Browser Advanced Matching uses Meta’s own hashing. No customer information is embedded in cacheable page HTML. Requires the server relay for the CAPI half. Make sure your privacy policy and cookie banner cover this before enabling it in the EEA.</p>';
 		echo '</td></tr>';
 		echo '<tr><th>All forms</th><td>'; self::c( 'am_all_forms', 'Detect customer data in every form, not only checkout and account forms', 'Covers contact, newsletter and booking forms without adding <code>data-dxps-match</code>. Search boxes, passwords, payment fields and anything marked <code>data-dxps-ignore</code> stay excluded.' ); echo '</td></tr>';
-		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long the hashed matching data is kept for a returning browser, so later events (page views, add to cart) still carry it. <strong>0 = 10 minutes</strong> (default). 90 is typical. Only SHA-256 hashes are stored, they are deleted when consent is withdrawn, and your privacy policy should state the period.</p></td></tr>';
+		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long a visitor&#8217;s browser keeps the hashed matching data (cookie <code>_dxps_ud</code>), so the first pixel event of every later visit, and the server copies, still carry it. <strong>90 days is the default since 2.3.0</strong>; 0 = 10 minutes. Only SHA-256 hashes are stored, never readable values; the cookie is deleted when consent is withdrawn. Your privacy policy should state the period.</p></td></tr>';
 		echo '<tr><th>URL parameters</th><td><textarea name="url_identity" class="large-text" rows="3" placeholder="email | em' . "\n" . 'phone | ph' . "\n" . 'name | name">' . esc_textarea( DXPS_Helpers::opt( 'url_identity' ) ) . '</textarea><p class="description">One per line: <code>url_parameter | field</code>. For email, SMS or booking links that arrive with customer details in the URL (for example <code>?email=…&amp;phone=…</code>). Fields: <code>em</code> <code>ph</code> <code>fn</code> <code>ln</code> <code>name</code> (full name) <code>ct</code> <code>st</code> <code>zp</code> <code>country</code>. Values are hashed in the browser and never sent as part of a page URL.</p></td></tr>';
 		echo '<tr><th>Phone numbers</th><td>'; self::c( 'phone_default_country', 'Assume the store country for phone numbers written without a country code', 'Meta only matches phone numbers that include a country code. Without this, local-format numbers from forms that have no country field are dropped.' ); echo '</td></tr>';
 		echo '<tr><th>Browser ID fallback</th><td>'; self::c( 'fbp_fallback', 'Create the _fbp browser ID cookie when Meta&#8217;s script is blocked', 'Ad blockers stop Meta&#8217;s script, so it never sets <code>_fbp</code> and server events lose that signal. DX then creates the cookie in Meta&#8217;s own format, after consent.' ); echo '</td></tr>';
+		echo '<tr><th>Visitor IPv6</th><td>'; self::c( 'ip6_lookup', 'Look up the visitor&#8217;s IPv6 address in the browser and send it with server events', 'Meta prefers IPv6 and reports server events that carry IPv4 while the pixel sees IPv6. A site reached over IPv4 cannot see the IPv6 address itself, so after consent the visitor&#8217;s browser asks the service below once a day (Meta&#8217;s own example uses api64.ipify.org). Mention this third-party request in your privacy policy.' );
+		echo '<p><input type="url" name="ip6_url" value="' . esc_attr( (string) DXPS_Helpers::opt( 'ip6_url', 'https://api64.ipify.org' ) ) . '" class="regular-text"> <span class="description">IPv6-capable &#8220;what is my IP&#8221; address that returns the IP as plain text.</span></p></td></tr>';
+		echo '<tr><th>In-app click ID</th><td>'; self::c( 'param_builder', 'Use Meta&#8217;s Parameter Builder in the Facebook and Instagram in-app browsers', 'Those browsers often open ad links without the click ID in the address. When no click ID is stored, Meta&#8217;s official script (pinned version, from cdn.jsdelivr.net) recovers it there. Other browsers load nothing extra.' ); echo '</td></tr>';
 		echo '<tr><th>Location fill-in</th><td><select name="geo_enrich">';
-		foreach ( array( '' => 'Off (default)', 'country' => 'Country', 'full' => 'Country, city, region and ZIP' ) as $gk => $gl ) {
+		foreach ( array( '' => 'Off', 'country' => 'Country', 'full' => 'Country, city, region and ZIP (default since 2.4.0)' ) as $gk => $gl ) {
 			echo '<option value="' . esc_attr( $gk ) . '" ' . selected( (string) DXPS_Helpers::opt( 'geo_enrich' ), $gk, false ) . '>' . esc_html( $gl ) . '</option>';
 		}
 		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Anything the customer types always wins.</p></td></tr>';
+		echo '<tr><th>Order-email links</th><td>'; self::c( 'email_identity', 'Recognise returning buyers who open a link in their order email', 'Links to the shop in WooCommerce customer emails about an order get a signed token with no personal data in it. When the buyer opens one and has given consent, their order&#8217;s hashed details are kept in their browser, so later visits match them. Only for orders whose buyer allowed marketing at checkout. Mention it in your privacy policy.' ); echo '</td></tr>';
 		echo '</table><h2>Content tracking (blog posts, pages, services)</h2><table class="form-table">';
 		echo '<tr><th>Track these content types</th><td>';
 		$chosen = DXPS_Helpers::content_types();
@@ -262,10 +275,10 @@ class DXPS_Settings {
 	private static function tab_consent() {
 		echo '<h2>Consent Mode v2</h2><table class="form-table"><tr><th></th><td>';
 		self::c( 'consent_mode', 'Enable Consent Mode v2',
-			'<strong>ON:</strong> Google tags default to <em>denied</em> for EEA/UK/CH visitors (required for your HR/SI/DE traffic) and <em>granted</em> elsewhere — BA/RS visitors are unaffected. Meta Pixel is held for EEA visitors until your banner calls <code>dxpsConsent(\'granted\')</code>. Server relay respects the same consent state.<br><strong>OFF:</strong> everything fires immediately for everyone.' );
+			'<strong>ON:</strong> Google consent defaults to denied globally; DX marketing events and customer matching require your banner to call <code>dxpsConsent(\'granted\')</code>. Unknown location and cached pages follow the same rule. <code>dxpsConsent(\'denied\')</code> withdraws consent and clears DX identity/matching storage.<br><strong>OFF:</strong> events may run without an explicit grant, but an explicit denial is still respected. Connect your consent banner before enabling tracking.' );
 		echo '</td></tr></table>';
 		echo '<h2>Privacy hard rules (always active)</h2><ul style="list-style:disc;margin-left:20px">
-			<li>All customer data is SHA-256 hashed before transmission (Meta/Google spec).</li>
+			<li>Matching identity fields use platform-specific SHA-256 normalization. Browser IDs, IP/UA and allowed Google address components follow the respective platform specifications.</li>
 			<li>Coupons matching the excluded keywords never reach any platform.</li>
 			<li>DX suppresses recognized sensitive-health contexts and excludes free-text fields; review custom integrations and destinations separately.</li></ul>';
 	}
@@ -293,13 +306,55 @@ class DXPS_Settings {
 		echo '<h2>Facebook Login ID</h2><p>' . ( $fbn > 0
 			? '<span style="color:#00a32a;font-weight:600">' . (int) $fbn . ' account(s)</span> have a Facebook Login ID that DX can read. It is sent with server events while that customer is logged in, and with their purchases.'
 			: '<span style="color:#d63638;font-weight:600">None found.</span> DX reads the ID from Nextend Social Login, WooCommerce Social Login, Super Socializer and common user-meta fields. If your login plugin stores it elsewhere, tell your developer the meta key and add it with the <code>dxps_fb_login_meta_keys</code> filter.' ) . '</p>';
+		// 2.3.0: which address DX sends as the visitor IP. A wrong IP (a Cloudflare or proxy server) lowers match quality.
+		$setup = DXPS_Helpers::ip_setup();
+		$labels = array(
+			'cloudflare' => 'Requests arrive through <strong>Cloudflare</strong>. DX uses the visitor address Cloudflare passes on (<code>CF-Connecting-IP</code>).',
+			'proxy'      => 'Requests arrive through a <strong>local proxy or load balancer</strong>. DX uses the visitor address in its forwarding headers.',
+			'cloudflare_restored' => 'Requests arrive through <strong>Cloudflare</strong>, and your host already restores the visitor address. DX uses it as it is.',
+			'direct'     => 'Requests arrive <strong>directly</strong> (or the host already restores visitor addresses). DX uses the connection address.',
+		);
+		echo '<h2>Visitor IP address</h2><p>' . $labels[ $setup ] . ' Address detected for your own request: <code>' . esc_html( DXPS_Helpers::client_ip() ?: 'none' ) . '</code>. It should match the address shown by any &#8220;what is my IP&#8221; site. If it does not, use the <code>dxps_client_ip</code> filter.</p>';
+		// 2.4.1: where the location fill-in comes from, which Cloudflare headers arrive, and what DX sends for this request.
+		$src    = DXPS_Helpers::geo_source();
+		$cf_hdr = array();
+		foreach ( array( 'HTTP_CF_RAY' => 'CF-Ray', 'HTTP_CF_CONNECTING_IP' => 'CF-Connecting-IP', 'HTTP_CF_IPCOUNTRY' => 'CF-IPCountry', 'HTTP_CF_IPCITY' => 'CF-IPCity', 'HTTP_CF_REGION_CODE' => 'CF-Region-Code', 'HTTP_CF_POSTAL_CODE' => 'CF-Postal-Code' ) as $hk => $hn ) {
+			if ( ! empty( $_SERVER[ $hk ] ) ) $cf_hdr[] = $hn;
+		}
+		$src_label = array( 'cloudflare' => 'Cloudflare', 'cloudflare_restored' => 'Cloudflare (visitor address restored by your host)', 'filter' => 'Cloudflare headers (trusted by a developer filter)', 'maxmind' => 'WooCommerce MaxMind database', 'none' => 'none' );
+		$geo_city = ! empty( $_SERVER['HTTP_CF_IPCITY'] ) || ! empty( $_SERVER['HTTP_CF_POSTAL_CODE'] );
+		if ( 'none' === $src ) {
+			$next = $cf_hdr
+				? 'Cloudflare headers arrive, but not in a way DX can trust (no <code>CF-Ray</code>, or the visitor address does not match). Ask your host to restore visitor IPs from Cloudflare (mod_remoteip / LiteSpeed &#8220;Use Client IP in Header&#8221;).'
+				: 'No Cloudflare and no MaxMind database: only what customers type is sent. Free option: WooCommerce &rarr; Settings &rarr; Integration &rarr; MaxMind Geolocation (free licence key from maxmind.com).';
+		} elseif ( in_array( $src, array( 'cloudflare', 'cloudflare_restored', 'filter' ), true ) && ! $geo_city ) {
+			$next = 'Only the country arrives. In Cloudflare open Rules &rarr; Settings (Managed Transforms) and switch on <em>Add visitor location headers</em>.';
+		} else {
+			$next = 'City, region and ZIP are filled in for visitors who have not given them' . ( 'full' === DXPS_Helpers::opt( 'geo_enrich' ) ? '.' : ' (set &#8220;Location fill-in&#8221; to Country, city, region and ZIP).' );
+		}
+		echo '<p><strong>Location fill-in source:</strong> ' . esc_html( $src_label[ $src ] ) . '. ' . $next . '</p>';
+		echo '<p><strong>Cloudflare headers on your request:</strong> ' . ( $cf_hdr ? esc_html( implode( ', ', $cf_hdr ) ) : 'none' ) . '</p>';
+		$mine = array_merge( DXPS_Helpers::geo_hashes(), DXPS_Helpers::user_data_full(), array_filter( array( 'client_ip_address' => DXPS_Helpers::client_ip(), 'fbp' => DXPS_Helpers::fbp(), 'fbc' => DXPS_Helpers::fbc(), 'external_id' => DXPS_Helpers::external_ids() ) ) );
+		echo '<p><strong>What DX sends for you right now:</strong> ' . esc_html( implode( ', ', array_keys( DXPS_Helpers::valid_user_data( $mine ) ) ) ?: 'nothing' ) . ' <span class="description">(field names only; a visitor who never typed anything gets location, IP, browser and cookie IDs)</span></p>';
+		// 2.3.1: relay delivery over the last 7 days. Refusals point at the cause when Meta reports fewer server events than pixel events.
+		$rs = DXPS_Helpers::relay_stats( 7 );
+		$why = array( 'origin' => 'Wrong address (the page was opened on an address DX does not count as this site)', 'rate' => 'Rate limit (browser-minutes over the limit)', 'bot' => 'Bot filter', 'size' => 'Request too large', 'consent' => 'No marketing consent', 'sensitive' => 'Health-related page (never sent)', 'meta_error' => 'Meta rejected the call (check the token)' );
+		echo '<h2>Server relay, last 7 days</h2>';
+		if ( ! $rs ) {
+			echo '<p>No refused or failed relay requests recorded.' . ( DXPS_Helpers::on( 'event_log' ) ? '' : ' Successful sends are counted only while the event log is on.' ) . '</p>';
+		} else {
+			echo '<table class="widefat striped" style="max-width:720px"><tbody>';
+			if ( isset( $rs['sent'] ) ) echo '<tr><td>Events sent to the Conversions API</td><td>' . (int) $rs['sent'] . ( isset( $rs['sent_ipv6'] ) ? ' (' . (int) $rs['sent_ipv6'] . ' with an IPv6 address)' : '' ) . '</td></tr>';
+			foreach ( $why as $k => $label ) if ( ! empty( $rs[ $k ] ) ) echo '<tr><td>' . esc_html( $label ) . '</td><td>' . (int) $rs[ $k ] . '</td></tr>';
+			echo '</tbody></table><p class="description">Requests refused for consent or health reasons are intended. Many &#8220;wrong address&#8221; or &#8220;rate limit&#8221; refusals explain a Meta diagnostic saying the server sends fewer events than the pixel.</p>';
+		}
 		echo '<h2>Matching-field coverage</h2>';
 		if ( ! DXPS_Helpers::on( 'event_log' ) ) {
 			echo '<p>The event log is off. Turn on <strong>Event log</strong> on the Events &amp; Parameters tab, browse the shop and place a test order, then come back here.</p>';
 		}
 		if ( ! $log ) { echo '<p>No server events recorded yet.</p>'; return; }
 
-		$fields = array( 'em' => 'Email', 'ph' => 'Phone', 'fn' => 'First name', 'ln' => 'Last name', 'ct' => 'City', 'zp' => 'ZIP', 'country' => 'Country', 'external_id' => 'External ID', 'fbp' => 'Browser ID (fbp)', 'fbc' => 'Click ID (fbc)', 'client_ip_address' => 'IP', 'client_user_agent' => 'User agent', 'fb_login_id' => 'FB Login ID' );
+		$fields = array( 'em' => 'Email', 'ph' => 'Phone', 'fn' => 'First name', 'ln' => 'Last name', 'ct' => 'City', 'st' => 'State / region', 'zp' => 'ZIP', 'country' => 'Country', 'external_id' => 'External ID', 'fbp' => 'Browser ID (fbp)', 'fbc' => 'Click ID (fbc)', 'client_ip_address' => 'IP', 'client_user_agent' => 'User agent', 'fb_login_id' => 'FB Login ID' );
 		$by = array();
 		foreach ( $log as $row ) {
 			$e = (string) ( $row['e'] ?? '' );
@@ -340,7 +395,7 @@ class DXPS_Settings {
 			array( 'GA4 API secret filled', '_ga4_secret', null, 'Required for Measurement Protocol.' ),
 			array( 'Google Ads + Enhanced Conversions', 'gads_enabled', 1, 'Enable direct Ads only with valid IDs/labels and a single conversion owner; match-quality gains vary.' ),
 			array( 'GTM', 'gtm_enabled', 0, 'Keep ON if GTM owns Google tracking; GTM-only suppresses DX direct Google dispatch, not DX Meta.' ),
-			array( 'Consent Mode v2', 'consent_mode', 1, 'ON — mandatory for your EU traffic (HR/SI/DE); BA/RS unaffected.' ),
+			array( 'Consent Mode v2', 'consent_mode', 1, 'ON — require consent globally, including when location is unknown.' ),
 			array( 'Purchase trigger = order status', '_purchase_status', null, 'COD store: fire on Completed, not thank-you — kills conversions from failed pouzeće orders.' ),
 			array( 'Server relay', 'server_relay', 1, 'Uses validated, consent-allowed matching fields and minimized Meta parameters; actual coverage depends on available customer data.' ),
 			array( 'Lead clicks (WhatsApp/tel/mail)', 'track_leads', 1, 'ON — WhatsApp is your biggest untracked conversion path.' ),
