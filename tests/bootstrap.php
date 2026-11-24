@@ -78,7 +78,10 @@ class WC_Order {
 	function get_billing_first_name() { return $this->d['first']; } function get_billing_last_name() { return $this->d['last']; } function get_billing_city() { return $this->d['city']; }
 	function get_billing_state() { return $this->d['state']; } function get_billing_postcode() { return $this->d['zip']; } function get_billing_country() { return $this->d['country']; }
 }
-function wc_get_order( $id ) { return $GLOBALS['t']['orders'][ $id ] ?? false; } function current_user_can() { return false; }
+function wc_get_order( $id ) { return $GLOBALS['t']['orders'][ $id ] ?? false; }
+// 2.4.1: WooCommerce MaxMind geolocation stand-in.
+class WC_Integration_MaxMind_Geolocation {}
+class WC_Geolocation { static function geolocate_ip( $ip, $fallback = false, $api = true ) { $GLOBALS['t']['geo_calls'] = ( $GLOBALS['t']['geo_calls'] ?? 0 ) + 1; return $GLOBALS['t']['maxmind'][ $ip ] ?? array( 'country' => '', 'state' => '', 'city' => '', 'postcode' => '' ); } } function current_user_can() { return false; }
 function is_admin() { return false; } function wp_doing_ajax() { return false; } function wp_doing_cron() { return false; }
 function wp_generate_uuid4() { return sprintf( '%08x-%04x-4%03x-a%03x-%012x', mt_rand(), mt_rand( 0, 0xffff ), mt_rand( 0, 0xfff ), mt_rand( 0, 0xfff ), mt_rand() ); }
 function wp_remote_post( $url, $args ) { $GLOBALS['t']['http'][] = array( 'url' => $url, 'body' => json_decode( $args['body'], true ), 'headers' => $args['headers'] ); return array( 'code' => 200, 'body' => json_encode( array( 'events_received' => count( json_decode( $args['body'], true )['data'] ?? array( 1 ) ) ) ) ); }

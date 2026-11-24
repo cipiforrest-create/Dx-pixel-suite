@@ -311,16 +311,31 @@ class DXPS_Settings {
 		$labels = array(
 			'cloudflare' => 'Requests arrive through <strong>Cloudflare</strong>. DX uses the visitor address Cloudflare passes on (<code>CF-Connecting-IP</code>).',
 			'proxy'      => 'Requests arrive through a <strong>local proxy or load balancer</strong>. DX uses the visitor address in its forwarding headers.',
+			'cloudflare_restored' => 'Requests arrive through <strong>Cloudflare</strong>, and your host already restores the visitor address. DX uses it as it is.',
 			'direct'     => 'Requests arrive <strong>directly</strong> (or the host already restores visitor addresses). DX uses the connection address.',
 		);
 		echo '<h2>Visitor IP address</h2><p>' . $labels[ $setup ] . ' Address detected for your own request: <code>' . esc_html( DXPS_Helpers::client_ip() ?: 'none' ) . '</code>. It should match the address shown by any &#8220;what is my IP&#8221; site. If it does not, use the <code>dxps_client_ip</code> filter.</p>';
-		// 2.4.0: Cloudflare location headers (city / region / ZIP fill-in needs them).
-		if ( 'cloudflare' === $setup ) {
-			$geo_ok = ! empty( $_SERVER['HTTP_CF_IPCITY'] ) || ! empty( $_SERVER['HTTP_CF_POSTAL_CODE'] );
-			echo '<p><strong>Location headers:</strong> ' . ( $geo_ok
-				? '<span style="color:#00a32a;font-weight:600">arriving</span> (city / region / ZIP fill-in works).'
-				: '<span style="color:#d63638;font-weight:600">missing</span>. Only the country is filled in. In Cloudflare open Rules &rarr; Settings (Managed Transforms) and switch on <em>Add visitor location headers</em>.' ) . '</p>';
+		// 2.4.1: where the location fill-in comes from, which Cloudflare headers arrive, and what DX sends for this request.
+		$src    = DXPS_Helpers::geo_source();
+		$cf_hdr = array();
+		foreach ( array( 'HTTP_CF_RAY' => 'CF-Ray', 'HTTP_CF_CONNECTING_IP' => 'CF-Connecting-IP', 'HTTP_CF_IPCOUNTRY' => 'CF-IPCountry', 'HTTP_CF_IPCITY' => 'CF-IPCity', 'HTTP_CF_REGION_CODE' => 'CF-Region-Code', 'HTTP_CF_POSTAL_CODE' => 'CF-Postal-Code' ) as $hk => $hn ) {
+			if ( ! empty( $_SERVER[ $hk ] ) ) $cf_hdr[] = $hn;
 		}
+		$src_label = array( 'cloudflare' => 'Cloudflare', 'cloudflare_restored' => 'Cloudflare (visitor address restored by your host)', 'filter' => 'Cloudflare headers (trusted by a developer filter)', 'maxmind' => 'WooCommerce MaxMind database', 'none' => 'none' );
+		$geo_city = ! empty( $_SERVER['HTTP_CF_IPCITY'] ) || ! empty( $_SERVER['HTTP_CF_POSTAL_CODE'] );
+		if ( 'none' === $src ) {
+			$next = $cf_hdr
+				? 'Cloudflare headers arrive, but not in a way DX can trust (no <code>CF-Ray</code>, or the visitor address does not match). Ask your host to restore visitor IPs from Cloudflare (mod_remoteip / LiteSpeed &#8220;Use Client IP in Header&#8221;).'
+				: 'No Cloudflare and no MaxMind database: only what customers type is sent. Free option: WooCommerce &rarr; Settings &rarr; Integration &rarr; MaxMind Geolocation (free licence key from maxmind.com).';
+		} elseif ( in_array( $src, array( 'cloudflare', 'cloudflare_restored', 'filter' ), true ) && ! $geo_city ) {
+			$next = 'Only the country arrives. In Cloudflare open Rules &rarr; Settings (Managed Transforms) and switch on <em>Add visitor location headers</em>.';
+		} else {
+			$next = 'City, region and ZIP are filled in for visitors who have not given them' . ( 'full' === DXPS_Helpers::opt( 'geo_enrich' ) ? '.' : ' (set &#8220;Location fill-in&#8221; to Country, city, region and ZIP).' );
+		}
+		echo '<p><strong>Location fill-in source:</strong> ' . esc_html( $src_label[ $src ] ) . '. ' . $next . '</p>';
+		echo '<p><strong>Cloudflare headers on your request:</strong> ' . ( $cf_hdr ? esc_html( implode( ', ', $cf_hdr ) ) : 'none' ) . '</p>';
+		$mine = array_merge( DXPS_Helpers::geo_hashes(), DXPS_Helpers::user_data_full(), array_filter( array( 'client_ip_address' => DXPS_Helpers::client_ip(), 'fbp' => DXPS_Helpers::fbp(), 'fbc' => DXPS_Helpers::fbc(), 'external_id' => DXPS_Helpers::external_ids() ) ) );
+		echo '<p><strong>What DX sends for you right now:</strong> ' . esc_html( implode( ', ', array_keys( DXPS_Helpers::valid_user_data( $mine ) ) ) ?: 'nothing' ) . ' <span class="description">(field names only; a visitor who never typed anything gets location, IP, browser and cookie IDs)</span></p>';
 		// 2.3.1: relay delivery over the last 7 days. Refusals point at the cause when Meta reports fewer server events than pixel events.
 		$rs = DXPS_Helpers::relay_stats( 7 );
 		$why = array( 'origin' => 'Wrong address (the page was opened on an address DX does not count as this site)', 'rate' => 'Rate limit (browser-minutes over the limit)', 'bot' => 'Bot filter', 'size' => 'Request too large', 'consent' => 'No marketing consent', 'sensitive' => 'Health-related page (never sent)', 'meta_error' => 'Meta rejected the call (check the token)' );

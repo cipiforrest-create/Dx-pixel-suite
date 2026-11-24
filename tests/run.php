@@ -233,6 +233,35 @@ DXPS_Email_Identity::remember( '', new class( $GLOBALS['t']['orders'][56] ) { pu
 ok( $html === DXPS_Email_Identity::rewrite( $html ), 'order without marketing consent gets no token' );
 $GLOBALS['t']['user'] = 7; // the rendered-page checks below expect the signed-in customer
 
+/* ---------------- 2.4.1: hosts that restore the visitor IP; MaxMind fallback ---------------- */
+echo "Location sources (2.4.1)\n";
+settings( array( 'geo_enrich' => 'full', 'auto_am' => 1, 'consent_mode' => 0 ) );
+$srv = $_SERVER; $GLOBALS['t']['transients'] = array(); $_COOKIE = array(); $u0 = $GLOBALS['t']['user']; $GLOBALS['t']['user'] = 0;
+$_SERVER = array_merge( $srv, array( 'REMOTE_ADDR' => '89.146.10.20', 'HTTP_CF_RAY' => '8f1a2b3c4d5e6f70-SJJ', 'HTTP_CF_CONNECTING_IP' => '89.146.10.20', 'HTTP_CF_IPCOUNTRY' => 'BA', 'HTTP_CF_IPCITY' => 'Zenica', 'HTTP_CF_REGION_CODE' => 'ZDK', 'HTTP_CF_POSTAL_CODE' => '72000' ) );
+$geo = DXPS_Helpers::geo_hashes();
+ok( 'cloudflare_restored' === DXPS_Helpers::ip_setup() && hash( 'sha256', 'zenica' ) === ( $geo['ct'] ?? '' ) && hash( 'sha256', '72000' ) === ( $geo['zp'] ?? '' ), 'host restored the Cloudflare visitor IP: location fill-in works' );
+ok( '89.146.10.20' === DXPS_Helpers::client_ip(), 'restored visitor address is sent as it is' );
+unset( $_SERVER['HTTP_CF_RAY'] );
+ok( 'direct' === DXPS_Helpers::ip_setup() && ! isset( DXPS_Helpers::geo_hashes()['ct'] ), 'without CF-Ray the headers are not trusted' );
+$_SERVER['HTTP_CF_RAY'] = '8f1a2b3c4d5e6f70-SJJ'; $_SERVER['HTTP_CF_CONNECTING_IP'] = '8.8.8.8';
+ok( 'direct' === DXPS_Helpers::ip_setup() && ! isset( DXPS_Helpers::geo_hashes()['ct'] ), 'visitor address not matching the connection: not trusted' );
+$_SERVER = array_merge( $srv, array( 'REMOTE_ADDR' => '89.146.10.21' ) );
+$GLOBALS['t']['options']['woocommerce_maxmind_geolocation_settings'] = array( 'license_key' => 'k' );
+$GLOBALS['t']['maxmind']['89.146.10.21'] = array( 'country' => 'BA', 'state' => 'BIH', 'city' => 'Banja Luka', 'postcode' => '78000' );
+$GLOBALS['t']['geo_calls'] = 0;
+$geo = DXPS_Helpers::geo_hashes(); DXPS_Helpers::geo_hashes();
+ok( 'maxmind' === DXPS_Helpers::geo_source() && hash( 'sha256', 'banjaluka' ) === ( $geo['ct'] ?? '' ) && hash( 'sha256', '78000' ) === ( $geo['zp'] ?? '' ) && hash( 'sha256', 'ba' ) === ( $geo['country'] ?? '' ), 'no Cloudflare: WooCommerce MaxMind fills in the location' );
+ok( 1 === $GLOBALS['t']['geo_calls'], 'one database lookup per visitor IP (cached)' );
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'meta_capi_token' => 'tok', 'auto_am' => 1, 'consent_mode' => 0, 'geo_enrich' => 'full' ) );
+$_COOKIE = array( '_dxps_ud' => 'em.' . hash( 'sha256', 'x@y.ba' ) . '~ct.' . hash( 'sha256', 'bihac' ) );
+$n0 = count( $GLOBALS['t']['http'] );
+DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'page_view', 'm.1' ) ) ), $h ) );
+$ud = $GLOBALS['t']['http'][ $n0 ]['body']['data'][0]['user_data'] ?? array();
+ok( hash( 'sha256', 'bihac' ) === ( $ud['ct'] ?? '' ) && hash( 'sha256', '78000' ) === ( $ud['zp'] ?? '' ), 'relay: customer city wins, ZIP from MaxMind' );
+unset( $GLOBALS['t']['options']['woocommerce_maxmind_geolocation_settings'] );
+ok( 'none' === DXPS_Helpers::geo_source(), 'nothing configured: no location source' );
+$_SERVER = $srv; $_COOKIE = array(); $GLOBALS['t']['user'] = $u0;
+
 /* ---------------- rendered page (consumed by tests/browser.js) ---------------- */
 settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'ga4_enabled' => 1, 'ga4_id' => 'G-TEST', 'gads_enabled' => 1, 'gads_conversion_id' => 'AW-1', 'gads_purchase_label' => 'lbl', 'gads_merchant_id' => '5551234', 'gads_feed_country' => 'ba', 'gads_remarketing' => 1, 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'fbp_fallback' => 1 ) );
 $_SERVER['REQUEST_URI'] = '/product/1/';

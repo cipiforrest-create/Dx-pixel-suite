@@ -678,20 +678,71 @@ class DXPS_Helpers {
 	 * only where the customer has not given that field. Approximate, and derived from the IP Meta already receives.
 	 */
 	public static function geo_hashes() {
-		// Cloudflare's location headers are only believed when the request really came from a Cloudflare edge server
-		// (2.4.0; before, only with the dxps_trust_proxy_headers filter, so the setting silently did nothing).
-		if ( 'cloudflare' !== self::ip_setup() && ! apply_filters( 'dxps_trust_proxy_headers', false ) ) return array();
 		$mode = (string) self::opt( 'geo_enrich' );
 		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
-		$raw = array();
-		$c = self::country();
-		if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
-		if ( 'full' === $mode ) {
-			foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
-				if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
+		$raw    = array();
+		$source = self::geo_source();
+		if ( 'cloudflare' === $source || 'cloudflare_restored' === $source || 'filter' === $source ) {
+			// Cloudflare's visitor-location headers. Believed only when the request really came through Cloudflare
+			// (edge address, or the visitor address the host restored from it), or a developer filter says so.
+			$c = self::country();
+			if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
+			if ( 'full' === $mode ) {
+				foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
+					if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
+				}
 			}
+		} elseif ( 'maxmind' === $source ) {
+			$raw = self::maxmind_location();
+			if ( 'full' !== $mode ) $raw = array_intersect_key( $raw, array( 'country' => 1 ) );
 		}
 		return $raw ? self::matching_hashes( $raw ) : array();
+	}
+
+	/**
+	 * 2.4.1: where the visitor's approximate location comes from.
+	 *   cloudflare           request from a Cloudflare edge address
+	 *   cloudflare_restored  host restored the visitor address from Cloudflare (CF-Ray present, CF-Connecting-IP = REMOTE_ADDR)
+	 *   filter               dxps_trust_proxy_headers filter
+	 *   maxmind              WooCommerce MaxMind geolocation database installed
+	 *   none
+	 */
+	public static function geo_source() {
+		$setup = self::ip_setup();
+		if ( 'cloudflare' === $setup || 'cloudflare_restored' === $setup ) return $setup;
+		if ( apply_filters( 'dxps_trust_proxy_headers', false ) ) return 'filter';
+		if ( self::maxmind_available() ) return 'maxmind';
+		return 'none';
+	}
+
+	/** WooCommerce's MaxMind GeoLite2 database is set up (WooCommerce → Settings → Integration → MaxMind). */
+	public static function maxmind_available() {
+		if ( ! class_exists( 'WC_Geolocation' ) || ! method_exists( 'WC_Geolocation', 'geolocate_ip' ) ) return false;
+		$integration = class_exists( 'WC_Integration_MaxMind_Geolocation' ) ? get_option( 'woocommerce_maxmind_geolocation_settings', array() ) : array();
+		return is_array( $integration ) && ! empty( $integration['license_key'] );
+	}
+
+	/**
+	 * Country / region / city / postcode from WooCommerce's MaxMind database for the visitor IP (local lookup, no
+	 * outside service). Cached per IP for a day.
+	 */
+	public static function maxmind_location() {
+		$ip = self::client_ip();
+		if ( ! $ip || ! self::public_ip( $ip ) ) return array();
+		$key = 'dxps_geo_' . md5( $ip );
+		$hit = get_transient( $key );
+		if ( is_array( $hit ) ) return $hit;
+		$out = array();
+		try {
+			$geo = WC_Geolocation::geolocate_ip( $ip, false, false );
+			foreach ( array( 'country' => 'country', 'st' => 'state', 'ct' => 'city', 'zp' => 'postcode' ) as $k => $g ) {
+				if ( ! empty( $geo[ $g ] ) && is_string( $geo[ $g ] ) ) $out[ $k ] = sanitize_text_field( $geo[ $g ] );
+			}
+		} catch ( \Throwable $e ) {
+			$out = array();
+		}
+		set_transient( $key, $out, DAY_IN_SECONDS );
+		return $out;
 	}
 
 	/** Post types selected for content tracking. */
@@ -990,6 +1041,9 @@ class DXPS_Helpers {
 	public static function ip_setup() {
 		$remote = $_SERVER['REMOTE_ADDR'] ?? '';
 		if ( self::ip_in_ranges( $remote, (array) apply_filters( 'dxps_cloudflare_ranges', self::CF_RANGES ) ) ) return 'cloudflare';
+		// 2.4.1: host in front of PHP already replaced the connection address with Cloudflare's visitor address.
+		$cf = isset( $_SERVER['HTTP_CF_CONNECTING_IP'] ) && is_string( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ? trim( $_SERVER['HTTP_CF_CONNECTING_IP'] ) : '';
+		if ( ! empty( $_SERVER['HTTP_CF_RAY'] ) && $cf && self::public_ip( $cf ) && $cf === $remote ) return 'cloudflare_restored';
 		if ( filter_var( $remote, FILTER_VALIDATE_IP ) && ! self::public_ip( $remote ) ) return 'proxy';
 		return 'direct';
 	}
