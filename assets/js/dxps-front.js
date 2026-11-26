@@ -21,12 +21,13 @@
 	}
 	window.dxpsInitIdentity = function(){
 	if (blocked() || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;
-	// External ID (first-party cross-session identifier) — cookie name: pbid.
-	if (getCookie('_dxps_eid') && !getCookie('pbid')) setCookie('pbid', getCookie('_dxps_eid'), 365); // migrate
-	if (!getCookie('pbid')) {
-		var eid = ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, function (c) {
-			return (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16);
-		}).replace(/-/g, '');
+	// 1.9.0: browser ID (pbid), _fbc and _fbp are created in <head> by dxpsEnsureIds(), before Meta's pixel starts,
+	// so pixel and server share one 64-hex external_id and the first server event already has a browser ID.
+	if (window.dxpsEnsureIds) window.dxpsEnsureIds();
+	else if (!/^[a-f0-9]{32,64}$/i.test(getCookie('pbid'))) {
+		// Page HTML cached before the update has no <head> helper: create a 64-hex browser ID here.
+		var a = new Uint8Array(32), eid = ''; crypto.getRandomValues(a);
+		for (var i = 0; i < 32; i++) eid += ('0' + a[i].toString(16)).slice(-2);
 		setCookie('pbid', eid, 365);
 	}
 	// GA client-id fallback.
@@ -40,21 +41,8 @@
 		if (Object.keys(keep).length && !getCookie('_dxps_src')) {
 			setCookie('_dxps_src', encodeURIComponent(JSON.stringify(keep)), 90);
 		}
-		// A new ad click (different fbclid) replaces the stored click ID; the same click keeps its timestamp.
-		var fbclid = q.get('fbclid'), curFbc = getCookie('_fbc');
-		if (fbclid && /^[A-Za-z0-9_-]{6,400}$/.test(fbclid) && (!curFbc || curFbc.slice(-(fbclid.length + 1)) !== '.' + fbclid)) {
-			setCookie('_fbc', 'fb.1.' + Date.now() + '.' + fbclid, 90);
-		}
 	})();
-
-	// 1.7.0 (opt-in): if Meta's script is blocked it never sets _fbp. After giving it time, create one in
-	// Meta's own format (fb.1.<ms>.<random>) so server events still carry a browser ID.
-	if (cfg.fbpFallback && !getCookie('_fbp')) setTimeout(function () {
-		if (getCookie('_fbp') || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;
-		setCookie('_fbp', 'fb.1.' + Date.now() + '.' + Math.floor(Math.random() * 9e9 + 1e9), 90);
-	}, 2500);
-
-	if(META_PIXEL&&window.dxpsMetaReady&&typeof fbq==='function'&&getCookie('pbid')){try{fbq('init',META_PIXEL,{external_id:getCookie('pbid')});}catch(e){}}
+	// (The pixel already received external_id in fbq('init'); calling init again only produced duplicate-init warnings.)
 	if (!getCookie('_dxps_lp')) setCookie('_dxps_lp', encodeURIComponent(safeUrl(location.href).slice(0, 300)), 90);
 	};
 	window.dxpsInitIdentity();
@@ -127,6 +115,10 @@
 		var scope = p._scope || 'all';
 		['page_title','user_role','tags','post_category','category_name','link_text','search_term','utm_term','utm_content','transactions_count','average_order','predicted_ltv'].forEach(function(k){delete p[k]});
 		['event_url','landing_page','link_url','form_action'].forEach(function(k){if(p[k])p[k]=safeUrl(p[k])});
+		// 1.9.0: the server checks the full parameter set (landing page, campaign, traffic source ...). Checking the same
+		// set here keeps both channels in step: an event the server would drop is not sent by the pixel alone either,
+		// which would show up in Events Manager as a pixel event without Conversions API coverage.
+		var metaBlocked = blocked(p);
 		var amDelivery=window.dxpsAmFlush?window.dxpsAmFlush():null;
 
 		var skipGoogle = scope === 'meta_only'; // the Google engine already reports this action itself
@@ -185,7 +177,7 @@
 			if (cfg.googleDirect && typeof gtag === 'function') gtag('event', name, glp);
 		}
 
-		if(scope==='gads_only'||scope==='google_only')return;
+		if(scope==='gads_only'||scope==='google_only'||metaBlocked)return;
 
 		/* Meta — trackSingle: events go ONLY to this plugin's pixel ID,
 		   never to other pixels initialised on the page (e.g. PixelYourSite). */
@@ -326,6 +318,7 @@
 			var f = ev.target;
 			if (!f || f.nodeName !== 'FORM') return;
 			if (f.className && /cart|checkout|login/i.test(f.className)) return; // covered by dedicated events
+			if (window.dxpsAmScan) window.dxpsAmScan(f); // so this Form event already carries the form's matching data
 			window.dxpsFire({ name: 'form_submit', params: {
 				form_id: (f.id || f.getAttribute('name') || 'form').slice(0, 80),
 				form_action: (f.getAttribute('action') || location.pathname).slice(0, 200)
@@ -395,7 +388,7 @@
 			document.addEventListener('mouseover', function (ev) { if (ev.target.closest && ev.target.closest(arg)) once(); }, true);
 		} else if (type === 'submit') {
 			if (!validSel(arg)) return;
-			document.addEventListener('submit', function (ev) { if (ev.target.closest && ev.target.closest(arg)) fireCustom(ce); }, true);
+			document.addEventListener('submit', function (ev) { if (ev.target.closest && ev.target.closest(arg)) { if (window.dxpsAmScan) window.dxpsAmScan(ev.target); fireCustom(ce); } }, true);
 		} else if (type === 'copy') {
 			document.addEventListener('copy', function () { once(); }, true);
 		} else if (type === 'visits') {
@@ -488,13 +481,20 @@
 			Object.keys(raw).forEach(function(k){var v=normalize(k,raw[k],country);if(v)payload[k]=v;});
 			var sig=JSON.stringify(payload);if(!Object.keys(payload).length||sig===amLast)return amPending;amLast=sig;
 			if (META_PIXEL && window.dxpsMetaReady && typeof fbq==='function') {try {fbq('init',META_PIXEL,payload);}catch(e){}}
-			if(cfg.userIngest && crypto.subtle) amPending=amPending.catch(function(){}).then(function(){
+			if(crypto.subtle&&(cfg.userIngest||window.dxpsAmPut)) amPending=amPending.catch(function(){}).then(function(){
 				if(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed())return;
-				return Promise.all(Object.keys(payload).map(function(k){return digest(payload[k]).then(function(v){return [k,v]})})).then(function(pairs){var hashed={};pairs.forEach(function(v){hashed[v[0]]=v[1]});return fetch(cfg.userIngest,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({user:hashed,hashed:true,url:safeUrl(location.href)})});});
+				return Promise.all(Object.keys(payload).map(function(k){return digest(payload[k]).then(function(v){return [k,v]})})).then(function(pairs){
+					var hashed={};pairs.forEach(function(v){hashed[v[0]]=v[1]});
+					// 1.9.0: keep the hashes in this browser, so the pixel's fbq('init') on later pages carries them too.
+					if(window.dxpsAmPut)window.dxpsAmPut(hashed);
+					if(cfg.userIngest)return fetch(cfg.userIngest,{method:'POST',credentials:'same-origin',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({user:hashed,hashed:true,url:safeUrl(location.href)})});
+				});
 			});
 			return amPending;
 		}
 		window.dxpsAmFlush=amFlush;
+		// Read every eligible field of one form (or the page) now, e.g. right before its Form / Lead event fires.
+		window.dxpsAmScan=function(root){(root&&root.querySelectorAll?root:document).querySelectorAll('input, select').forEach(function(el){amCapture(el);});};
 
 		// 1.7.0 (opt-in): identity from mapped URL parameters (email/SMS/booking links). Values go through the
 		// same normalise -> hash -> ingest path as form fields and are never sent in an event URL.

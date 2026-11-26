@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.8.1
-Stable tag: 1.8.1
+Version: 1.9.0
+Stable tag: 1.9.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,43 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 1.9.0 =
+Event coverage (Events Manager: "Rate of pixel events covered by Conversions API", goal 75%)
+* One external ID for both channels. The pixel hashed the 32-character browser ID while the server sent it raw, so
+  Meta saw two different IDs for the same visitor. Browser IDs are now 64-hex values that both channels send as-is;
+  existing IDs are upgraded in place (remembered matching data is kept).
+* The pixel's fbq('init') now carries external_id (it was added later by a second init, after PageView had fired).
+* _fbp is created in Meta's own format before Meta's script starts (the pixel adopts it), so the first server event
+  of a visit has the browser ID, also when an ad blocker stops Meta's script. _fbc from ?fbclid is set in <head>,
+  on the same domain Meta's pixel uses (example.ba, not www.example.ba), so there is no stale second copy.
+* The server relay re-sends _fbp, _fbc and the browser ID as HTTP cookies: Safari limits cookies written by
+  JavaScript to 7 days (24 hours after a click from Facebook). Click ID and browser ID survive for returning visitors.
+* The browser checks the same parameters as the server before sending to Meta (landing page, campaign, traffic
+  source). Before, the server could drop an event the pixel still sent: a pixel event without server coverage.
+* A failed Conversions API request (network error, 429, 5xx) is retried once.
+* Rate limit per visitor (IP + browser ID) instead of per IP: mobile networks put many visitors behind one IP.
+* Diagnostics lists events that were not sent to the Conversions API and why (consent, sensitive page, bot,
+  excluded role, rate limit ...). Warning when Facebook for WooCommerce, Meta Pixel for WordPress, Pixel Caffeine,
+  Pixel Manager or Conversios is active (their pixel events can never be covered by DX's server events).
+
+Event Match Quality (email, phone, Facebook Login ID)
+* Logged-in customers: relayed events now carry their email, name, phone, address, account ID and Facebook Login ID.
+  REST requests without a nonce run as logged out, so these were missing from every relayed event before.
+* Login / CompleteRegistration / Comment send the whole account (was: email only), both external IDs and the login
+  page as the event URL. Accounts with an excluded role are skipped.
+* Profile phone and address are read from the billing fields in user meta (also without WooCommerce) and common
+  phone meta keys; extend with the dxps_user_matching_raw filter.
+* Returning visitors: the SHA-256 matching hashes a visitor gave in a form are kept in their own browser for the
+  "Remember matching data" period and passed to fbq('init'), so pixel events carry email / phone too (before, only
+  server events did). Deleted when consent is withdrawn.
+* Form events: the submitted form is read before the Form / submit: event fires, so it carries that form's data.
+* Location fill-in: new option "+ ZIP estimated from the city" when Cloudflare has no postal code (Meta flagged
+  ZIP coverage). Main postal codes of larger cities in BA, HR, RS, SI, ME; extend with dxps_city_postcodes.
+
+To get the full gain, switch on (Events & Parameters): Automatic detection, All forms, Remember matching data
+30-90 days, Phone numbers (store country), Location fill-in "+ ZIP estimated from the city". Purge the page
+cache after updating. In Events Manager: "Track events automatically without code" OFF.
 
 = 1.8.1 =
 * Facebook Login ID is now also read from Nextend Social Login (its own database table), WooCommerce Social Login

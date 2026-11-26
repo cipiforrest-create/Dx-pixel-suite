@@ -13,6 +13,96 @@ class DXPS_Helpers {
 	/** Engagement switches that are ON by default. Used when the key was never written to the database. */
 	const FALLBACKS = array( 'track_scroll' => 1, 'track_time' => 1, 'track_clicks' => 1, 'time_on_page' => 30 );
 
+	/**
+	 * 1.9.0: one external-ID format for the pixel and the Conversions API.
+	 * The pixel hashes an external_id that does not look like SHA-256, the server sent the raw value: the same
+	 * visitor reached Meta with two different IDs. Every ID is now a 64-hex value, which both channels send as-is.
+	 * Legacy 32-hex browser IDs are doubled (same first 32 characters, so remembered matching data is kept).
+	 */
+	public static function norm_eid( $v ) {
+		$v = is_string( $v ) ? strtolower( trim( $v ) ) : '';
+		if ( preg_match( '/^[a-f0-9]{64}$/', $v ) ) return $v;
+		if ( preg_match( '/^[a-f0-9]{32,63}$/', $v ) ) return substr( $v . $v, 0, 64 );
+		return '';
+	}
+
+	/**
+	 * Cookie domain the Meta pixel uses for _fbp / _fbc: array( subdomain index, domain ).
+	 * www.example.ba -> ( 1, example.ba ); shop.example.com.ba -> ( 2, example.com.ba ). IPs / single labels -> host-only.
+	 */
+	public static function root_domain() {
+		static $r = null;
+		if ( null !== $r ) return $r;
+		$r    = array( 0, '' );
+		$host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+		if ( ! $host || filter_var( $host, FILTER_VALIDATE_IP ) || false === strpos( $host, '.' ) ) return $r;
+		$l    = explode( '.', $host );
+		$n    = count( $l );
+		$take = ( $n >= 3 && 2 === strlen( $l[ $n - 1 ] ) && in_array( $l[ $n - 2 ], array( 'com', 'co', 'org', 'net', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'in' ), true ) ) ? 3 : 2;
+		$take = min( $take, $n );
+		return $r = array( $take - 1, implode( '.', array_slice( $l, -$take ) ) );
+	}
+
+	/** Domain for a cookie whose Meta value says "fb.<index>." (index 0 = host-only). '' = host-only / unknown. */
+	public static function domain_for_index( $index ) {
+		$host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+		$l    = explode( '.', $host );
+		$index = (int) $index;
+		if ( $index < 1 || $index + 1 > count( $l ) || filter_var( $host, FILTER_VALIDATE_IP ) ) return '';
+		return implode( '.', array_slice( $l, -( $index + 1 ) ) );
+	}
+
+	/** Set a first-party cookie from PHP (a real Set-Cookie header, which Safari ITP does not cap at 7 days). */
+	public static function set_cookie( $name, $value, $days, $domain = '' ) {
+		if ( headers_sent() ) return;
+		setcookie( $name, $value, array(
+			'expires'  => time() + (int) $days * DAY_IN_SECONDS,
+			'path'     => '/',
+			'domain'   => $domain,
+			'secure'   => is_ssl() || 'https' === wp_parse_url( home_url(), PHP_URL_SCHEME ),
+			'httponly' => false, // Meta's pixel and DX's own script read these cookies
+			'samesite' => 'Lax',
+		) );
+		$_COOKIE[ $name ] = $value;
+	}
+
+	/**
+	 * 1.9.0 cookie keeper, called from the server relay: re-sends _fbp, _fbc and the browser ID as HTTP cookies with
+	 * the same value and domain. Cookies written by JavaScript live 7 days in Safari (24 hours after a click from
+	 * Facebook); refreshed by the server they keep their normal lifetime, so returning visitors keep fbp / fbc.
+	 */
+	public static function refresh_cookies() {
+		if ( headers_sent() || ! self::marketing_allowed() ) return;
+		if ( self::on( 'meta_enabled' ) && self::opt( 'meta_pixel_id' ) ) {
+			foreach ( array( '_fbp', '_fbc' ) as $name ) {
+				$val = self::valid_user_data( array( substr( $name, 1 ) => isset( $_COOKIE[ $name ] ) && is_string( $_COOKIE[ $name ] ) ? $_COOKIE[ $name ] : '' ) )[ substr( $name, 1 ) ] ?? '';
+				if ( $val && preg_match( '/^fb\.([0-9])\./', $val, $m ) ) self::set_cookie( $name, $val, 90, self::domain_for_index( (int) $m[1] ) );
+			}
+		}
+		// The browser ID is host-only (as DX's script writes it). Left alone while PixelYourSite owns a cookie of that name.
+		$raw = isset( $_COOKIE[ self::EXT_COOKIE ] ) && is_string( $_COOKIE[ self::EXT_COOKIE ] ) ? $_COOKIE[ self::EXT_COOKIE ] : '';
+		$eid = self::norm_eid( $raw );
+		if ( $eid && ! self::pys_active() ) self::set_cookie( self::EXT_COOKIE, $eid, 365 );
+	}
+
+	public static function pys_active() {
+		return defined( 'PYS_VERSION' ) || defined( 'PYS_FREE_VERSION' );
+	}
+
+	/**
+	 * REST requests without a nonce run as a logged-out visitor, so relayed events of logged-in customers carried no
+	 * email, name, phone, account ID or Facebook Login ID. The relay cannot send a nonce (cached pages hold stale
+	 * ones), so it reads the identity from the login cookie. Used only to enrich the visitor's own events: the relay
+	 * accepts same-origin requests only and changes nothing for the user. Returns the previous user ID to restore.
+	 */
+	public static function adopt_cookie_user() {
+		$prev = get_current_user_id();
+		if ( $prev || ! function_exists( 'wp_validate_auth_cookie' ) || ! defined( 'LOGGED_IN_COOKIE' ) || empty( $_COOKIE[ LOGGED_IN_COOKIE ] ) ) return $prev;
+		$uid = (int) wp_validate_auth_cookie( '', 'logged_in' );
+		if ( $uid > 0 ) wp_set_current_user( $uid );
+		return $prev;
+	}
+
 	public static function opt( $key, $default = '' ) {
 		static $o = null;
 		if ( null === $o ) $o = get_option( 'dxps_settings', array() );
@@ -160,7 +250,8 @@ class DXPS_Helpers {
 		// Meta accepts several external IDs for one person (e.g. the browser ID and the account ID).
 		$eids = array();
 		foreach ( (array) ( $data['external_id'] ?? array() ) as $eid ) {
-			if ( is_string( $eid ) && preg_match( '/^[a-f0-9]{32,64}$/i', $eid ) ) $eids[ strtolower( $eid ) ] = 1;
+			$eid = self::norm_eid( $eid );
+			if ( '' !== $eid ) $eids[ $eid ] = 1;
 		}
 		$eids = array_slice( array_keys( $eids ), 0, 3 );
 		if ( $eids ) $out['external_id'] = 1 === count( $eids ) ? $eids[0] : $eids;
@@ -252,10 +343,42 @@ class DXPS_Helpers {
 	 * Server-side CAPI is the opposite: it requires pre-hashed values. That asymmetry is
 	 * why these are two separate methods — do NOT feed this one to the CAPI sender.
 	 */
+	/**
+	 * Raw (unhashed) matching values of a WordPress account: profile, then the billing fields WooCommerce keeps in
+	 * user meta (they stay there even when WooCommerce is off), then common phone meta keys.
+	 * Extend with the dxps_user_matching_raw filter (keys: em, ph, fn, ln, ct, st, zp, country).
+	 */
+	public static function user_raw( $u ) {
+		if ( ! $u instanceof WP_User || ! $u->exists() ) return array();
+		$m   = function ( $k ) use ( $u ) { $v = get_user_meta( $u->ID, $k, true ); return is_scalar( $v ) ? (string) $v : ''; };
+		$raw = array(
+			'em'      => $u->user_email,
+			'fn'      => $u->first_name ?: $m( 'billing_first_name' ),
+			'ln'      => $u->last_name ?: $m( 'billing_last_name' ),
+			'ph'      => $m( 'billing_phone' ) ?: ( $m( 'phone' ) ?: ( $m( 'mobile' ) ?: $m( 'phone_number' ) ) ),
+			'ct'      => $m( 'billing_city' ),
+			'st'      => $m( 'billing_state' ),
+			'zp'      => $m( 'billing_postcode' ),
+			'country' => $m( 'billing_country' ),
+		);
+		$raw = apply_filters( 'dxps_user_matching_raw', array_filter( $raw ), $u->ID );
+		return is_array( $raw ) ? $raw : array();
+	}
+
+	/** Hashed matching data + account external ID + Facebook Login ID of a given account (login / sign-up events). */
+	public static function user_data_for_user( $user_id ) {
+		$u = get_userdata( (int) $user_id );
+		if ( ! $u ) return array();
+		$raw = self::user_raw( $u );
+		$d   = self::matching_hashes( $raw );
+		$d['external_id'] = hash( 'sha256', 'dxps.user.' . (int) $user_id );
+		return array_merge( $d, self::user_extra( (int) $user_id ) );
+	}
+
 	public static function user_data_plain() {
 		if ( ! self::marketing_allowed() ) return array();
 		$raw = array(); $u = wp_get_current_user();
-		if ( $u && $u->exists() ) $raw = array( 'em'=>$u->user_email, 'fn'=>$u->first_name, 'ln'=>$u->last_name );
+		if ( $u && $u->exists() ) $raw = self::user_raw( $u );
 		if ( function_exists( 'WC' ) && WC()->customer ) {
 			$c = WC()->customer;
 			$billing = array( 'em'=>$c->get_billing_email(), 'ph'=>$c->get_billing_phone(), 'fn'=>$c->get_billing_first_name(), 'ln'=>$c->get_billing_last_name(), 'ct'=>$c->get_billing_city(), 'st'=>$c->get_billing_state(), 'zp'=>$c->get_billing_postcode(), 'country'=>$c->get_billing_country() );
@@ -290,19 +413,26 @@ class DXPS_Helpers {
 
 	/* ---------------- First-party identifiers ---------------- */
 
-	public static function external_id() {
+	/** Browser ID from the pbid cookie (or DX's own cookie when another plugin owns pbid), 64-hex normalized. */
+	public static function browser_id() {
 		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) return strtolower( $_COOKIE[ $c ] );
+			$v = self::norm_eid( isset( $_COOKIE[ $c ] ) && is_string( $_COOKIE[ $c ] ) ? $_COOKIE[ $c ] : '' );
+			if ( '' !== $v ) return $v;
 		}
+		return '';
+	}
+
+	public static function external_id() {
+		$v = self::browser_id();
+		if ( '' !== $v ) return $v;
 		return is_user_logged_in() ? hash( 'sha256', 'dxps.user.' . get_current_user_id() ) : '';
 	}
 
 	/** Every external ID known for this visitor: browser ID cookie plus, when logged in, the account ID. */
 	public static function external_ids() {
 		$ids = array();
-		foreach ( array( self::EXT_COOKIE, self::EXT_COOKIE_LEGACY ) as $c ) {
-			if ( ! empty( $_COOKIE[ $c ] ) && preg_match( '/^[a-f0-9]{32,64}$/i', $_COOKIE[ $c ] ) ) { $ids[] = strtolower( $_COOKIE[ $c ] ); break; }
-		}
+		$b   = self::browser_id();
+		if ( '' !== $b ) $ids[] = $b;
 		if ( is_user_logged_in() ) $ids[] = hash( 'sha256', 'dxps.user.' . get_current_user_id() );
 		return array_values( array_unique( $ids ) );
 	}
@@ -353,7 +483,7 @@ class DXPS_Helpers {
 		// A new ad click (a different fbclid) replaces the stored click ID - Meta attributes to the latest click.
 		if ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $_GET['fbclid'] ) ) {
 			$suffix = '.' . $_GET['fbclid'];
-			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.1.' . round( microtime( true ) * 1000 ) . $suffix;
+			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.' . self::root_domain()[0] . '.' . round( microtime( true ) * 1000 ) . $suffix;
 		}
 		return self::valid_user_data( array( 'fbc'=>$v ) )['fbc'] ?? '';
 	}
@@ -478,16 +608,38 @@ class DXPS_Helpers {
 	 */
 	public static function geo_hashes() {
 		$mode = (string) self::opt( 'geo_enrich' );
-		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
+		if ( ! in_array( $mode, array( 'country', 'full', 'full_zip' ), true ) ) return array();
 		$raw = array();
 		$c = self::country();
 		if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
-		if ( 'full' === $mode ) {
+		if ( 'country' !== $mode ) {
 			foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
 				if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
 			}
+			// 1.9.0 (opt-in): Cloudflare rarely knows the postal code outside the US. Use the city's main postal code.
+			if ( 'full_zip' === $mode && empty( $raw['zp'] ) && ! empty( $raw['ct'] ) && ! empty( $raw['country'] ) ) {
+				$zip = self::city_postcode( $raw['country'], $raw['ct'] );
+				if ( '' !== $zip ) $raw['zp'] = $zip;
+			}
 		}
 		return $raw ? self::matching_hashes( $raw ) : array();
+	}
+
+	/** Main postal code of larger cities in the store's region. Extend or replace with the dxps_city_postcodes filter. */
+	const CITY_POSTCODES = array(
+		'BA' => array( 'sarajevo' => '71000', 'banjaluka' => '78000', 'tuzla' => '75000', 'zenica' => '72000', 'mostar' => '88000', 'bihac' => '77000', 'bijeljina' => '76300', 'brcko' => '76100', 'prijedor' => '79101', 'doboj' => '74000', 'trebinje' => '89101', 'cazin' => '77220', 'travnik' => '72270', 'livno' => '80101', 'gorazde' => '73000', 'visoko' => '71300', 'gradiska' => '78400', 'zvornik' => '75400', 'konjic' => '88400', 'sirokibrijeg' => '88220', 'bugojno' => '70230', 'lukavac' => '75300', 'zivinice' => '75270', 'gracanica' => '75320', 'gradacac' => '76250', 'srebrenik' => '75350', 'tesanj' => '74260', 'kakanj' => '72240', 'pale' => '71420', 'foca' => '73300', 'capljina' => '88300', 'ljubuski' => '88320', 'velikakladusa' => '77230', 'sanskimost' => '79260', 'jajce' => '70101', 'derventa' => '74400', 'laktasi' => '78250', 'teslic' => '74270', 'prnjavor' => '78430' ),
+		'HR' => array( 'zagreb' => '10000', 'split' => '21000', 'rijeka' => '51000', 'osijek' => '31000', 'zadar' => '23000' ),
+		'RS' => array( 'belgrade' => '11000', 'beograd' => '11000', 'novisad' => '21000', 'nis' => '18000', 'kragujevac' => '34000' ),
+		'SI' => array( 'ljubljana' => '1000', 'maribor' => '2000' ),
+		'ME' => array( 'podgorica' => '81000' ),
+	);
+
+	public static function city_postcode( $country, $city ) {
+		$map  = apply_filters( 'dxps_city_postcodes', self::CITY_POSTCODES );
+		$cc   = strtoupper( (string) $country );
+		$key  = strtolower( function_exists( 'remove_accents' ) ? remove_accents( (string) $city ) : (string) $city );
+		$key  = preg_replace( '/[^a-z]/', '', str_replace( array( 'đ', 'Đ' ), 'd', $key ) );
+		return ( is_array( $map ) && isset( $map[ $cc ][ $key ] ) && is_scalar( $map[ $cc ][ $key ] ) ) ? (string) $map[ $cc ][ $key ] : '';
 	}
 
 	/** Post types selected for content tracking. */
@@ -557,10 +709,14 @@ class DXPS_Helpers {
 
 	/** True when the logged-in user has a role excluded from tracking (staff, test accounts). */
 	public static function excluded_role() {
+		if ( ! is_user_logged_in() ) return false;
+		return self::role_excluded( wp_get_current_user() );
+	}
+
+	/** True when this account has a role excluded from tracking (also used where the user is not "current" yet). */
+	public static function role_excluded( $u ) {
 		$roles = array_filter( array_map( 'sanitize_key', explode( ',', (string) self::opt( 'exclude_roles' ) ) ) );
-		if ( ! $roles || ! is_user_logged_in() ) return false;
-		$u = wp_get_current_user();
-		return $u && array_intersect( $roles, (array) $u->roles ) ? true : false;
+		return $roles && $u instanceof WP_User && array_intersect( $roles, (array) $u->roles ) ? true : false;
 	}
 
 	/** Purchase value: order total, or (opt-in) the total without tax and shipping. */

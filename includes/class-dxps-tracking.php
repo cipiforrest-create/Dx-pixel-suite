@@ -50,19 +50,12 @@ class DXPS_Tracking {
 	public static function capture_fbclid_early() {
 		if ( ! DXPS_Helpers::marketing_allowed() || DXPS_Helpers::sensitive_context( $_SERVER['REQUEST_URI'] ?? '/' ) ) return;
 		if ( empty( $_GET['fbclid'] ) || headers_sent() ) return;
+		if ( ! DXPS_Helpers::on( 'meta_enabled' ) ) return;
 		$fbc = DXPS_Helpers::fbc(); // keeps the cookie for the same click, new value for a new ad click
 		if ( ! $fbc || ( isset( $_COOKIE['_fbc'] ) && $_COOKIE['_fbc'] === $fbc ) ) return;
-		// 400 days is the hard ceiling modern browsers (Chrome/Edge) enforce on Set-Cookie
-		// Expires/Max-Age regardless of what's requested, so that's the real-world maximum.
-		setcookie( '_fbc', $fbc, array(
-			'expires'  => time() + 400 * DAY_IN_SECONDS,
-			'path'     => '/',
-			'domain'   => '',
-			'secure'   => is_ssl(),
-			'httponly' => false, // Meta's own JS SDK needs to read this cookie too
-			'samesite' => 'Lax',
-		) );
-		$_COOKIE['_fbc'] = $fbc; // usable immediately within this same request
+		// 1.9.0: same domain as Meta's pixel (example.ba, not www.example.ba). A host-only copy next to the pixel's
+		// domain cookie left two _fbc cookies, and the stale one could win after the next ad click.
+		DXPS_Helpers::set_cookie( '_fbc', $fbc, 90, DXPS_Helpers::root_domain()[1] ); // also usable within this request
 	}
 
 	/** 1.7.0: staff / test roles excluded from tracking. Decided once per request. */
@@ -104,7 +97,12 @@ gtag('set','url_passthrough',true);
 			// Existing GTM remains the browser owner until migration is validated.
 		}
 
-		echo '<script>window.dxpsConsentRequired=' . ( DXPS_Helpers::on( 'consent_mode' ) ? 'true' : 'false' ) . ';</script>';
+		echo '<script>window.dxpsConsentRequired=' . ( DXPS_Helpers::on( 'consent_mode' ) ? 'true' : 'false' ) . ';window.dxpsBlockedCtx=' . ( $blocked ? 'true' : 'false' ) . ';window.dxpsIdCfg=' . wp_json_encode( array(
+			'meta' => $meta ? 1 : 0,
+			// Seconds the hashed matching data may be kept in this browser (same period as on the server).
+			'ret'  => ( DXPS_Helpers::on( 'auto_am' ) && ( $meta || $ga4 ) ) ? DXPS_Helpers::retention() : 0,
+		) ) . ';</script>';
+		self::identity_js();
 		if ( DXPS_Helpers::on( 'block_bots' ) ) {
 			// Decided in the browser because cached HTML is the same for people and crawlers.
 			echo "<script>window.dxpsBot=!!navigator.webdriver||/bot[\\/;]|adsbot|crawl|spider|slurp|headless|lighthouse|pagespeed|gtmetrix|pingdom|uptimerobot|statuscake|facebookexternalhit|scrape|phantomjs|ahrefs|semrush|bytespider/i.test(navigator.userAgent||'');</script>";
@@ -116,7 +114,7 @@ gtag('set','url_passthrough',true);
 (function(w){
 function state(){var m=document.cookie.match(/(?:^|;\s*)_dxps_consent=(granted|denied)(?:;|$)/);if(m)return m[1];try{var s=localStorage.getItem('eh-consent');return s==='granted'||s==='denied'?s:''}catch(e){return ''}}
 w.dxpsMarketingAllowed=function(){return !w.dxpsBot&&state()!=='denied'&&(!(w.dxpsConsentRequired)||state()==='granted')};
-w.dxpsConsent=function(value){var g=value===true||value==='granted',s=g?'granted':'denied';document.cookie='_dxps_consent='+s+';path=/;max-age=15552000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');try{localStorage.setItem('eh-consent',s)}catch(e){}w.__ehConsentState={analytics_storage:s,ad_storage:s,ad_user_data:s,ad_personalization:s};gtag('consent','update',w.__ehConsentState);dataLayer.push({event:'consent_update',consent_state:s});if(g&&w.dxpsInitIdentity)w.dxpsInitIdentity();if(g&&w.dxpsInitMeta)w.dxpsInitMeta();document.dispatchEvent(new CustomEvent('dxps:consent',{detail:s}))};
+w.dxpsConsent=function(value){var g=value===true||value==='granted',s=g?'granted':'denied';document.cookie='_dxps_consent='+s+';path=/;max-age=15552000;SameSite=Lax'+(location.protocol==='https:'?';Secure':'');try{localStorage.setItem('eh-consent',s)}catch(e){}if(!g&&w.dxpsAmClear)w.dxpsAmClear();if(g&&w.dxpsEnsureIds)w.dxpsEnsureIds();w.__ehConsentState={analytics_storage:s,ad_storage:s,ad_user_data:s,ad_personalization:s};gtag('consent','update',w.__ehConsentState);dataLayer.push({event:'consent_update',consent_state:s});if(g&&w.dxpsInitIdentity)w.dxpsInitIdentity();if(g&&w.dxpsInitMeta)w.dxpsInitMeta();document.dispatchEvent(new CustomEvent('dxps:consent',{detail:s}))};
 w.EynnaConsent=w.EynnaConsent||{};w.EynnaConsent.update=w.dxpsConsent;
 var saved=state();if(saved)w.dxpsConsent(saved);
 })(window);
@@ -141,13 +139,12 @@ DXPS_CONSENT_BRIDGE;
 
 		/* ---- Meta Pixel (consent-gated in EEA) ---- */
 		if ( $meta ) {
-			$adv = self::advanced_matching_js();
 			$px  = esc_js( $meta );
 			// 1.7.0 (opt-in): Meta Limited Data Use, geolocated by Meta (country 0, state 0).
 			$ldu = DXPS_Helpers::on( 'meta_ldu' ) ? "fbq('dataProcessingOptions',['LDU'],0,0);" : '';
 			echo "<script>
 window.dxpsMetaReady=false;
-window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}fbq('init','{$px}'{$adv});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
+window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAllowed&&!window.dxpsMarketingAllowed()))return;if(window.dxpsEnsureIds)window.dxpsEnsureIds();!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');window.dxpsMetaReady=true;{$ldu}fbq('init','{$px}',window.dxpsAmInit?window.dxpsAmInit():{});var id='page_view.'+Date.now()+'.'+Math.random().toString(36).slice(2);fbq('trackSingle','{$px}','PageView',{}, {eventID:id});if(window.dxpsMetaPageView)window.dxpsMetaPageView(id);else window.dxpsPendingPageView=id;(window.dxpsQ||[]).forEach(function(e){fbq.apply(null,e);});window.dxpsQ=[];};
 </script>\n";
 			if ( DXPS_Helpers::marketing_allowed() ) {
 				echo "<script>window.dxpsInitMeta();</script>\n";
@@ -201,7 +198,6 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 			'amAll'       => DXPS_Helpers::on( 'am_all_forms' ) ? 1 : 0,
 			'urlIdentity' => DXPS_Helpers::on( 'auto_am' ) ? DXPS_Helpers::url_identity() : array(),
 			'baseCountry' => DXPS_Helpers::on( 'phone_default_country' ) ? strtolower( DXPS_Helpers::default_country() ) : '',
-			'fbpFallback' => ( $meta && DXPS_Helpers::on( 'fbp_fallback' ) ) ? 1 : 0,
 			'formLeads'   => DXPS_Helpers::on( 'track_form_leads' ) ? 1 : 0,
 			'outbound'    => DXPS_Helpers::on( 'track_outbound' ) ? 1 : 0,
 			// ---- 1.8.0: content tracking (blog posts, pages, services) ----
@@ -227,17 +223,44 @@ window.dxpsInitMeta=function(){if(window.dxpsMetaReady||(window.dxpsMarketingAll
 	}
 
 	/**
-	 * Meta Advanced Matching object for fbq('init').
-	 *
-	 * Legacy implementation sent normalized values; the Meta pixel library hashes
-	 * them in the browser before transmission — nothing leaves the visitor's device
-	 * unhashed. Previously these were pre-hashed here, which made the pixel hash them a
-	 * second time; the double-hash matched nothing, so browser Advanced Matching was
-	 * effectively dead weight and EMQ suffered. (Server CAPI still uses hashed values.)
+	 * 1.9.0 browser identity, inline in <head> so it runs before Meta's pixel:
+	 *  - dxpsEnsureIds(): browser ID (pbid, 64-hex, the same value the server sends as external_id), _fbc from
+	 *    ?fbclid= and _fbp in Meta's own format, on the domain Meta's pixel uses. The pixel adopts an existing _fbp,
+	 *    so the first server event of a visit already carries the browser ID instead of waiting for fbevents.js.
+	 *  - dxpsAmInit(): the Advanced Matching object for fbq('init'): external_id plus the SHA-256 matching hashes
+	 *    this browser already gave in a form (kept in localStorage for the "Remember matching data" period).
+	 *    Customer data is still never placed in cacheable HTML; only hashes stay in the visitor's own browser.
 	 */
-	private static function advanced_matching_js() {
-		// Customer data is never placed in cacheable HTML.
-		return '';
+	private static function identity_js() {
+		echo <<<'DXPS_IDENTITY'
+<script>
+(function(w,d){
+var C=w.dxpsIdCfg||{},HEX=/^[a-f0-9]{64}$/;
+function ck(n){var m=d.cookie.match(new RegExp('(?:^|;\\s*)'+n+'=([^;]*)'));return m?m[1]:''}
+function put(n,v,days,dom){d.cookie=n+'='+v+';path=/;max-age='+Math.round(days*86400)+(dom?';domain=.'+dom:'')+';SameSite=Lax'+(location.protocol==='https:'?';Secure':'')}
+function root(){if(w.__dxpsRoot)return w.__dxpsRoot;var h=location.hostname,l=h.split('.'),r={i:0,d:''};if(l.length>1&&!/^[0-9.]+$/.test(h)&&h.indexOf(':')<0){for(var i=1;i<l.length;i++){var dm=l.slice(-(i+1)).join('.');d.cookie='_dxps_t=1;path=/;domain=.'+dm+';SameSite=Lax';if(/(?:^|;\s*)_dxps_t=1(?:;|$)/.test(d.cookie)){d.cookie='_dxps_t=;path=/;domain=.'+dm+';max-age=0';r={i:i,d:dm};break}}}return w.__dxpsRoot=r}
+function rnd(n){var a=new Uint8Array(n),s='';(w.crypto||w.msCrypto).getRandomValues(a);for(var i=0;i<n;i++)s+=('0'+a[i].toString(16)).slice(-2);return s}
+function norm(v){v=String(v||'').toLowerCase();return HEX.test(v)?v:(/^[a-f0-9]{32,63}$/.test(v)?(v+v).slice(0,64):'')}
+function ok(){return !w.dxpsBlockedCtx&&!(w.dxpsMarketingAllowed&&!w.dxpsMarketingAllowed())}
+w.dxpsEid=function(){return norm(ck('pbid'))||norm(ck('_dxps_eid'))};
+w.dxpsEnsureIds=function(){
+if(!ok())return '';
+try{
+var raw=ck('pbid'),e=norm(raw);
+if(e){if(e!==raw)put('pbid',e,365)}
+else{var lg=norm(ck('_dxps_eid'));e=lg||rnd(32);if(!raw)put('pbid',e,365);else if(!lg)put('_dxps_eid',e,365)}
+if(C.meta){var r=root(),fc='';try{fc=new URLSearchParams(location.search).get('fbclid')||''}catch(x){}
+var cur=ck('_fbc');if(fc&&/^[A-Za-z0-9_-]{6,400}$/.test(fc)&&(!cur||cur.slice(-(fc.length+1))!=='.'+fc))put('_fbc','fb.'+r.i+'.'+Date.now()+'.'+fc,90,r.d);
+if(!ck('_fbp'))put('_fbp','fb.'+r.i+'.'+Date.now()+'.'+(1e9+Math.floor(Math.random()*9e9)),90,r.d)}
+return e}catch(x){return ''}};
+w.dxpsAmClear=function(){try{localStorage.removeItem('dxps_am')}catch(x){}};
+w.dxpsAmGet=function(){try{var s=JSON.parse(localStorage.getItem('dxps_am')||'null');if(!s||!s.h)return {};if(!C.ret||s.x<Date.now()||s.e!==w.dxpsEid()||!ok()){w.dxpsAmClear();return {}}return s.h}catch(x){return {}}};
+w.dxpsAmPut=function(h){if(!C.ret||!ok()||!w.dxpsEid())return;try{var o=w.dxpsAmGet(),k;if(o.em&&h.em&&o.em!==h.em)o={};for(k in h)if(/^(em|ph|fn|ln|ct|st|zp|country)$/.test(k)&&HEX.test(h[k]))o[k]=h[k];localStorage.setItem('dxps_am',JSON.stringify({h:o,x:Date.now()+C.ret*1000,e:w.dxpsEid()}))}catch(x){}};
+w.dxpsAmInit=function(){var o={},h=w.dxpsAmGet(),e=w.dxpsEid(),k;for(k in h)o[k]=h[k];if(e)o.external_id=e;return o};
+})(window,document);
+</script>
+
+DXPS_IDENTITY;
 	}
 	public static function enqueue() {
 		if ( self::off() ) return;

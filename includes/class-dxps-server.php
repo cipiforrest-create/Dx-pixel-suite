@@ -37,19 +37,29 @@ class DXPS_Server {
 		// Those are not visitor conversions and would carry the administrator's cookies, IP and consent.
 		if ( is_admin() && ! wp_doing_ajax() ) return;
 		if ( wp_doing_ajax() && 'Login' !== $meta_name && ( current_user_can( 'create_users' ) || current_user_can( 'moderate_comments' ) ) ) return;
-		$user = $user_id ? array_filter( array(
-			'em'          => DXPS_Helpers::hash( get_userdata( $user_id )->user_email ?? '' ),
-			'external_id' => DXPS_Helpers::external_id(),
-			'fbp'         => DXPS_Helpers::fbp(),
-			'fbc'         => DXPS_Helpers::fbc(),
+		// At wp_login / user_register the account is not the "current user" yet: check its own roles.
+		if ( $user_id ? DXPS_Helpers::role_excluded( get_userdata( $user_id ) ) : DXPS_Helpers::excluded_role() ) return;
+		$base = array_filter( array(
+			'external_id'       => DXPS_Helpers::external_ids(),
+			'fbp'               => DXPS_Helpers::fbp(),
+			'fbc'               => DXPS_Helpers::fbc(),
 			'client_ip_address' => self::ip(),
-			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( $_SERVER['HTTP_USER_AGENT'] ), 0, 500 ) : '',
-		) ) : array_merge( DXPS_Helpers::user_data_full(), array_filter( array(
-			'external_id' => DXPS_Helpers::external_id(), 'fbp' => DXPS_Helpers::fbp(), 'fbc' => DXPS_Helpers::fbc(),
-			'client_ip_address' => self::ip(),
-		) ) );
+			'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 500 ) : '',
+		) );
+		if ( $user_id ) {
+			// 1.9.0: the whole account (email, name, phone, address, account ID, Facebook Login ID), not only the email.
+			$account = DXPS_Helpers::user_data_for_user( $user_id );
+			$base['external_id'] = array_values( array_unique( array_merge( (array) ( $base['external_id'] ?? array() ), array( $account['external_id'] ) ) ) );
+			unset( $account['external_id'] );
+			$user = array_merge( DXPS_Helpers::geo_hashes(), $account, $base );
+			// The next page views of this browser carry the same matching data.
+			DXPS_Helpers::remember_user_data( $account );
+		} else {
+			$user = array_merge( DXPS_Helpers::geo_hashes(), DXPS_Helpers::user_data_full(), $base );
+		}
 		$eid = DXPS_Helpers::event_id( $ga4_name );
-		self::send_meta( $meta_name, $extra, $eid, $user );
+		$ref = function_exists( 'wp_get_referer' ) ? wp_get_referer() : '';
+		self::send_meta( $meta_name, $extra, $eid, $user, DXPS_Helpers::safe_event_url( $ref ?: home_url( '/' ) ) );
 		self::send_ga4( $ga4_name, $extra, DXPS_Helpers::ga_client_id(), array(), $user_id ? (int) $user_id : null );
 	}
 
@@ -91,16 +101,41 @@ class DXPS_Server {
 
 	/** Same-origin + rate-limit guard shared by both public endpoints. */
 	private static function guard( WP_REST_Request $req ) {
-		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
-		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
-		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
-		if ( ! $host || $host !== $site ) return false;
+		if ( ! self::same_origin( $req ) ) return false;
 		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) return false;
-		$ip   = self::ip();
-		$rate = (int) get_transient( 'dxps_rl_' . md5( $ip ) );
-		if ( $rate >= 120 ) return false;
-		set_transient( 'dxps_rl_' . md5( $ip ), $rate + 1, MINUTE_IN_SECONDS );
+		return self::rate_ok();
+	}
+
+	private static function same_origin( WP_REST_Request $req ) {
+		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
+		$host   = $origin ? strtolower( (string) wp_parse_url( $origin, PHP_URL_HOST ) ) : '';
+		$site   = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+		return $host && $host === $site;
+	}
+
+	/**
+	 * 120 requests a minute per visitor (IP + browser ID). Mobile networks put many visitors behind one IP address,
+	 * so a per-IP limit dropped real events; the IP as a whole gets a ceiling of 1200.
+	 */
+	private static function rate_ok() {
+		$ip  = self::ip();
+		$eid = DXPS_Helpers::browser_id();
+		$key = 'dxps_rl_' . md5( $ip . '|' . $eid );
+		$n   = (int) get_transient( $key );
+		if ( $n >= 120 ) return false;
+		set_transient( $key, $n + 1, MINUTE_IN_SECONDS );
+		if ( '' !== $eid ) {
+			$ipk = 'dxps_rlip_' . md5( $ip );
+			$m   = (int) get_transient( $ipk );
+			if ( $m >= 1200 ) return false;
+			set_transient( $ipk, $m + 1, MINUTE_IN_SECONDS );
+		}
 		return true;
+	}
+
+	/** Diagnostics: an event the relay did not forward, with the reason (event log only). */
+	private static function log_skip( $name, $status ) {
+		DXPS_Helpers::log_event( array( 'e' => substr( (string) $name, 0, 60 ), 'ok' => 0, 's' => (string) $status, 'f' => array(), 'v' => 0, 'k' => 'skip' ) );
 	}
 
 	/**
@@ -114,6 +149,7 @@ class DXPS_Server {
 	 */
 	public static function ingest_user_data( WP_REST_Request $req ) {
 		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok' => false ), 403 );
+		DXPS_Helpers::adopt_cookie_user();
 
 		if ( ! DXPS_Helpers::marketing_allowed() ) return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'consent' ), 200 );
 
@@ -138,35 +174,38 @@ class DXPS_Server {
 	public static function relay( WP_REST_Request $req ) {
 		// NOTE: no nonce — page caching (LiteSpeed/Cloudflare) serves stale nonces
 		// which silently killed all server events. Same-origin + rate limit instead.
-		$origin = $req->get_header( 'origin' ) ?: $req->get_header( 'referer' );
-		$host   = $origin ? wp_parse_url( $origin, PHP_URL_HOST ) : '';
-		$site   = wp_parse_url( home_url(), PHP_URL_HOST );
-		if ( ! $host || $host !== $site ) {
-			DXPS_Helpers::log( 'Relay rejected: bad origin', array( 'origin' => $origin ) );
+		$name = sanitize_text_field( (string) $req->get_param( 'name' ) );
+		if ( ! self::same_origin( $req ) ) {
+			DXPS_Helpers::log( 'Relay rejected: bad origin', array( 'origin' => $req->get_header( 'origin' ) ?: $req->get_header( 'referer' ) ) );
+			self::log_skip( $name, 'bad_origin' );
 			return new WP_REST_Response( array( 'ok' => false ), 403 );
 		}
-		$ip   = self::ip();
-		$rate = (int) get_transient( 'dxps_rl_' . md5( $ip ) );
-		if ( $rate >= 120 ) return new WP_REST_Response( array( 'ok' => false, 'rate' => true ), 429 );
-		set_transient( 'dxps_rl_' . md5( $ip ), $rate + 1, MINUTE_IN_SECONDS );
+		if ( ! self::rate_ok() ) { self::log_skip( $name, 'rate_limited' ); return new WP_REST_Response( array( 'ok' => false, 'rate' => true ), 429 ); }
 		if ( ! DXPS_Helpers::marketing_allowed() ) {
+			self::log_skip( $name, 'consent' );
 			return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'consent' ), 200 );
 		}
 		if ( DXPS_Helpers::on( 'block_bots' ) && DXPS_Helpers::is_bot() ) {
+			self::log_skip( $name, 'bot' );
 			return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'bot' ), 200 );
 		}
+		// 1.9.0: logged-in customers keep their identity on relayed events (see adopt_cookie_user()).
+		DXPS_Helpers::adopt_cookie_user();
+		if ( DXPS_Helpers::excluded_role() ) { self::log_skip( $name, 'excluded_role' ); return new WP_REST_Response( array( 'ok' => true, 'skipped' => 'excluded_role' ), 200 ); }
 
-		$name     = sanitize_text_field( $req->get_param( 'name' ) );
 		$event_id = sanitize_text_field( $req->get_param( 'event_id' ) );
 		$params   = (array) $req->get_param( 'params' );
 		$url      = esc_url_raw( $req->get_param( 'url' ) );
-		if ( DXPS_Helpers::sensitive_context( $url, $params ) || DXPS_Helpers::sensitive_context( $name ) ) return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'sensitive_context' ), 200 );
+		if ( DXPS_Helpers::sensitive_context( $url, $params ) || DXPS_Helpers::sensitive_context( $name ) ) { self::log_skip( $name, 'sensitive_context' ); return new WP_REST_Response( array( 'ok'=>true, 'skipped'=>'sensitive_context' ), 200 ); }
 		$url = DXPS_Helpers::safe_event_url( $url );
+		// Re-send _fbp / _fbc / browser ID as HTTP cookies so Safari does not expire them after 7 days.
+		DXPS_Helpers::refresh_cookies();
 		unset( $params['_dxps_marketing_allowed'], $params['_dxps_event_time'] );
 
 		$allowed = array( 'page_view', 'view_item', 'view_item_list', 'add_to_cart', 'remove_from_cart', 'view_cart', 'begin_checkout', 'add_to_wishlist', 'add_payment_info', 'add_shipping_info', 'search', 'generate_lead', 'purchase', 'scroll', 'time_on_page', 'internal_click', 'form_submit', 'file_download', 'login', 'sign_up', 'comment', 'outbound_click', 'view_content', 'view_content_list', 'content_engaged' );
 		foreach ( self::custom_event_names() as $ce ) $allowed[] = $ce;
 		if ( ! in_array( $name, $allowed, true ) || ! $event_id ) {
+			self::log_skip( $name, 'unknown_event' );
 			return new WP_REST_Response( array( 'ok' => false ), 400 );
 		}
 		// purchase relays only in thankyou mode (status mode sends its own).
@@ -266,15 +305,20 @@ class DXPS_Server {
 		// A valid test code is permitted only in an authenticated administrator AJAX request.
 		$diagnostic = $test_code && preg_match( '/^TEST[0-9]{1,30}$/', $test_code ) && wp_doing_ajax() && current_user_can( 'manage_options' );
 		if ( $test_code && ! $diagnostic ) return array( 'ok' => false, 'status' => 'forbidden_test' );
+		// Events that never reach Meta are recorded too (event log only), so Diagnostics shows why coverage drops.
+		$skip = function ( $status ) use ( $event_name, $diagnostic ) {
+			if ( ! $diagnostic ) self::log_skip( $event_name, $status );
+			return array( 'ok' => false, 'status' => $status );
+		};
 		if ( ! $diagnostic && ! DXPS_Helpers::on( 'meta_enabled' ) ) return array( 'ok' => false, 'status' => 'disabled' );
-		if ( ! $pixel || ! $token ) return array( 'ok' => false, 'status' => 'not_configured' );
+		if ( ! $pixel || ! $token ) return $skip( 'not_configured' );
 		$allowed = array_key_exists( '_dxps_marketing_allowed', $params ) ? (bool) $params['_dxps_marketing_allowed'] : DXPS_Helpers::marketing_allowed();
-		if ( ! $allowed ) return array( 'ok' => false, 'status' => 'consent' );
+		if ( ! $allowed ) return $skip( 'consent' );
 
-		if ( ! $diagnostic && ( DXPS_Helpers::sensitive_context( $url, $params ) || DXPS_Helpers::sensitive_context( $event_name ) ) ) return array( 'ok'=>false, 'status'=>'sensitive_context' );
+		if ( ! $diagnostic && ( DXPS_Helpers::sensitive_context( $url, $params ) || DXPS_Helpers::sensitive_context( $event_name ) ) ) return $skip( 'sensitive_context' );
 		$user_data = DXPS_Helpers::valid_user_data( $user_data );
-		if ( ! $user_data ) return array( 'ok'=>false, 'status'=>'insufficient_user_data' );
-		if ( ! preg_match( '/^[A-Za-z0-9_.:-]{1,100}$/', $event_id ) ) return array( 'ok'=>false, 'status'=>'invalid_event_id' );
+		if ( ! $user_data ) return $skip( 'insufficient_user_data' );
+		if ( ! preg_match( '/^[A-Za-z0-9_.:-]{1,100}$/', $event_id ) ) return $skip( 'invalid_event_id' );
 		$url = DXPS_Helpers::safe_event_url( $url ?: home_url( '/' ) );
 		$custom = array();
 		if ( isset( $params['value'] ) && is_numeric( $params['value'] ) && is_finite( (float) $params['value'] ) && (float) $params['value'] >= 0 ) $custom['value'] = (float) $params['value'];
@@ -324,11 +368,17 @@ class DXPS_Server {
 		elseif ( DXPS_Helpers::opt( 'meta_test_code' ) ) $body['test_event_code'] = DXPS_Helpers::opt( 'meta_test_code' );
 
 		$version = preg_replace( '/[^v0-9.]/', '', (string) apply_filters( 'dxps_meta_api_version', self::META_API_VERSION ) );
-		$res = wp_remote_post( 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . $pixel . '/events?access_token=' . rawurlencode( $token ), array(
+		$endpoint = 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . $pixel . '/events?access_token=' . rawurlencode( $token );
+		$args     = array(
 			'timeout' => 5,
 			'headers' => array( 'Content-Type' => 'application/json' ),
 			'body'    => wp_json_encode( $body ),
-		) );
+		);
+		$res = wp_remote_post( $endpoint, $args );
+		// 1.9.0: one retry on a network error, rate limit or Meta server error. A lost server event is a pixel event
+		// without CAPI coverage; a repeat is harmless because Meta deduplicates on event_name + event_id.
+		$code = is_wp_error( $res ) ? 0 : (int) wp_remote_retrieve_response_code( $res );
+		if ( 0 === $code || 429 === $code || $code >= 500 ) $res = wp_remote_post( $endpoint, $args );
 		if ( is_wp_error( $res ) ) {
 			$result = array( 'ok' => false, 'status' => 'transport_error' );
 		} else {

@@ -14,7 +14,7 @@ class DXPS_Settings {
 		),
 		'events' => array(
 			'text' => array( 'purchase_status', 'time_on_page', 'excluded_coupons', 'product_id_format', 'brand_name', 'custom_events', 'am_retention_days', 'url_identity', 'exclude_roles', 'purchase_value', 'content_service_paths', 'content_meta_event', 'content_read_scroll', 'content_read_time', 'geo_enrich' ),
-			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'fbp_fallback', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged' ),
+			'bool' => array( 'server_relay', 'track_leads', 'track_search', 'track_scroll', 'track_time', 'track_clicks', 'track_forms', 'track_downloads', 'track_signup', 'track_login', 'track_comments', 'track_brand', 'acr_enabled', 'auto_am', 'debug_log', 'am_all_forms', 'phone_default_country', 'track_form_leads', 'track_outbound', 'block_bots', 'event_log', 'content_archives', 'content_engaged' ),
 		),
 		'consent' => array(
 			'text' => array(),
@@ -73,7 +73,7 @@ class DXPS_Settings {
 			$o['content_meta_event']  = in_array( $o['content_meta_event'] ?? '', array( 'standard', 'custom' ), true ) ? $o['content_meta_event'] : 'auto';
 			$o['content_read_scroll'] = max( 10, min( 100, absint( $o['content_read_scroll'] ?: 50 ) ) );
 			$o['content_read_time']   = max( 5, min( 600, absint( $o['content_read_time'] ?: 30 ) ) );
-			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full' ), true ) ? $o['geo_enrich'] : '';
+			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full', 'full_zip' ), true ) ? $o['geo_enrich'] : '';
 		}
 		update_option( 'dxps_settings', $o );
 		// Post/Redirect/Get: DXPS_Helpers::opt() caches the options for the request, so rendering the form in
@@ -82,8 +82,31 @@ class DXPS_Settings {
 		exit;
 	}
 
+	/** Other plugins known to send their own Meta pixel events (plugin folder prefix => name). */
+	const OTHER_META = array(
+		'facebook-for-woocommerce'                     => 'Facebook for WooCommerce',
+		'official-facebook-pixel'                      => 'Meta Pixel for WordPress',
+		'pixel-caffeine'                               => 'Pixel Caffeine',
+		'woocommerce-google-adwords-conversion-tracking-tag' => 'Pixel Manager for WooCommerce',
+		'pixel-manager-pro-for-woocommerce'            => 'Pixel Manager Pro for WooCommerce',
+		'facebook-conversion-pixel'                    => 'Facebook Conversion Pixel',
+		'conversios'                                   => 'Conversios',
+	);
+
 	/** Another plugin sending to the same Meta pixel counts every shared event twice. */
 	private static function conflict_notice() {
+		// 1.9.0: other Meta pixel plugins. Their events have their own event IDs, which DX's server events can never
+		// match, so Events Manager reports them as pixel events without Conversions API coverage.
+		$others = array();
+		foreach ( (array) get_option( 'active_plugins', array() ) as $pl ) {
+			foreach ( self::OTHER_META as $slug => $label ) {
+				if ( is_string( $pl ) && 0 === strpos( $pl, $slug . '/' ) ) $others[] = $label;
+			}
+		}
+		if ( $others ) {
+			echo '<div class="notice notice-warning"><p><strong>' . esc_html( implode( ', ', array_unique( $others ) ) ) . ' ' . ( count( $others ) > 1 ? 'are' : 'is' ) . ' active.</strong> '
+				. 'If it sends to the same Meta pixel as DX Pixel Suite, its events are counted twice and have event IDs that DX&#8217;s server events cannot match: Events Manager then shows low &#8220;Event coverage&#8221;. Keep one plugin in charge of the Meta pixel.</p></div>';
+		}
 		$active = false;
 		foreach ( (array) get_option( 'active_plugins', array() ) as $pl ) {
 			if ( is_string( $pl ) && 0 === strpos( $pl, 'pixelyoursite' ) ) { $active = true; break; }
@@ -206,12 +229,12 @@ class DXPS_Settings {
 		echo '<tr><th>Remember matching data</th><td><input type="number" min="0" max="180" name="am_retention_days" value="' . esc_attr( (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) ) . '" style="width:70px"> days <p class="description">How long the hashed matching data is kept for a returning browser, so later events (page views, add to cart) still carry it. <strong>0 = 10 minutes</strong> (default). 90 is typical. Only SHA-256 hashes are stored, they are deleted when consent is withdrawn, and your privacy policy should state the period.</p></td></tr>';
 		echo '<tr><th>URL parameters</th><td><textarea name="url_identity" class="large-text" rows="3" placeholder="email | em' . "\n" . 'phone | ph' . "\n" . 'name | name">' . esc_textarea( DXPS_Helpers::opt( 'url_identity' ) ) . '</textarea><p class="description">One per line: <code>url_parameter | field</code>. For email, SMS or booking links that arrive with customer details in the URL (for example <code>?email=…&amp;phone=…</code>). Fields: <code>em</code> <code>ph</code> <code>fn</code> <code>ln</code> <code>name</code> (full name) <code>ct</code> <code>st</code> <code>zp</code> <code>country</code>. Values are hashed in the browser and never sent as part of a page URL.</p></td></tr>';
 		echo '<tr><th>Phone numbers</th><td>'; self::c( 'phone_default_country', 'Assume the store country for phone numbers written without a country code', 'Meta only matches phone numbers that include a country code. Without this, local-format numbers from forms that have no country field are dropped.' ); echo '</td></tr>';
-		echo '<tr><th>Browser ID fallback</th><td>'; self::c( 'fbp_fallback', 'Create the _fbp browser ID cookie when Meta&#8217;s script is blocked', 'Ad blockers stop Meta&#8217;s script, so it never sets <code>_fbp</code> and server events lose that signal. DX then creates the cookie in Meta&#8217;s own format, after consent.' ); echo '</td></tr>';
+		echo '<tr><th>Browser ID (_fbp)</th><td><p class="description" style="margin-top:0"><strong>Automatic since 1.9.0.</strong> After consent, DX creates <code>_fbp</code> in Meta&#8217;s own format before Meta&#8217;s script starts (the pixel then uses it), so the first server event of a visit already carries it, also when an ad blocker stops Meta&#8217;s script. The server relay re-sends <code>_fbp</code>, <code>_fbc</code> and the browser ID as first-party cookies, so Safari keeps them longer than 7 days.</p></td></tr>';
 		echo '<tr><th>Location fill-in</th><td><select name="geo_enrich">';
-		foreach ( array( '' => 'Off (default)', 'country' => 'Country', 'full' => 'Country, city, region and ZIP' ) as $gk => $gl ) {
+		foreach ( array( '' => 'Off (default)', 'country' => 'Country', 'full' => 'Country, city, region and ZIP', 'full_zip' => 'Country, city, region and ZIP + ZIP estimated from the city' ) as $gk => $gl ) {
 			echo '<option value="' . esc_attr( $gk ) . '" ' . selected( (string) DXPS_Helpers::opt( 'geo_enrich' ), $gk, false ) . '>' . esc_html( $gl ) . '</option>';
 		}
-		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Anything the customer types always wins.</p></td></tr>';
+		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Cloudflare rarely knows the ZIP outside the US: the last option then uses the main postal code of the visitor&#8217;s city (larger cities in BA, HR, RS, SI and ME; extend with the <code>dxps_city_postcodes</code> filter). Anything the customer types always wins.</p></td></tr>';
 		echo '</table><h2>Content tracking (blog posts, pages, services)</h2><table class="form-table">';
 		echo '<tr><th>Track these content types</th><td>';
 		$chosen = DXPS_Helpers::content_types();
@@ -299,11 +322,13 @@ class DXPS_Settings {
 		}
 		if ( ! $log ) { echo '<p>No server events recorded yet.</p>'; return; }
 
-		$fields = array( 'em' => 'Email', 'ph' => 'Phone', 'fn' => 'First name', 'ln' => 'Last name', 'ct' => 'City', 'zp' => 'ZIP', 'country' => 'Country', 'external_id' => 'External ID', 'fbp' => 'Browser ID (fbp)', 'fbc' => 'Click ID (fbc)', 'client_ip_address' => 'IP', 'client_user_agent' => 'User agent', 'fb_login_id' => 'FB Login ID' );
-		$by = array();
+		$fields = array( 'em' => 'Email', 'ph' => 'Phone', 'fn' => 'First name', 'ln' => 'Last name', 'ct' => 'City', 'st' => 'Region', 'zp' => 'ZIP', 'country' => 'Country', 'external_id' => 'External ID', 'fbp' => 'Browser ID (fbp)', 'fbc' => 'Click ID (fbc)', 'client_ip_address' => 'IP', 'client_user_agent' => 'User agent', 'fb_login_id' => 'FB Login ID' );
+		$by = array(); $skipped = array();
 		foreach ( $log as $row ) {
 			$e = (string) ( $row['e'] ?? '' );
 			if ( '' === $e ) continue;
+			// 1.9.0: events that never reached Meta, with the reason. Each one is a pixel event without CAPI coverage.
+			if ( 'skip' === ( $row['k'] ?? '' ) ) { $r = sanitize_key( (string) ( $row['s'] ?? '' ) ); $skipped[ $e ][ $r ] = ( $skipped[ $e ][ $r ] ?? 0 ) + 1; continue; }
 			if ( ! isset( $by[ $e ] ) ) $by[ $e ] = array( 'n' => 0, 'ok' => 0, 'f' => array() );
 			$by[ $e ]['n']++;
 			if ( ! empty( $row['ok'] ) ) $by[ $e ]['ok']++;
@@ -319,6 +344,15 @@ class DXPS_Settings {
 			echo '</tr>';
 		}
 		echo '</tbody></table></div>';
+
+		if ( $skipped ) {
+			$why = array( 'consent' => 'no marketing consent', 'sensitive_context' => 'sensitive-health page or parameters', 'bot' => 'bot user agent', 'excluded_role' => 'excluded user role', 'rate_limited' => 'rate limit', 'bad_origin' => 'request from another site', 'insufficient_user_data' => 'no matching data at all', 'not_configured' => 'pixel ID or CAPI token missing', 'unknown_event' => 'event name not allowed', 'invalid_event_id' => 'invalid event ID' );
+			echo '<h2>Not sent to the Conversions API</h2><p>Events the relay received but did not forward, and why. When the browser pixel still sent them, Events Manager counts them as pixel events without server coverage.</p><table class="widefat striped" style="max-width:720px"><thead><tr><th>Event</th><th>Reason</th><th>Count</th></tr></thead><tbody>';
+			foreach ( $skipped as $e => $reasons ) {
+				foreach ( $reasons as $r => $n ) echo '<tr><td>' . esc_html( $e ) . '</td><td>' . esc_html( $why[ $r ] ?? $r ) . '</td><td>' . (int) $n . '</td></tr>';
+			}
+			echo '</tbody></table>';
+		}
 
 		echo '<h2>Recent server events</h2><table class="widefat striped"><thead><tr><th>Time</th><th>Event</th><th>Result</th><th>Value</th><th>Matching fields sent</th></tr></thead><tbody>';
 		foreach ( array_slice( array_reverse( $log ), 0, 50 ) as $row ) {
@@ -353,7 +387,7 @@ class DXPS_Settings {
 			array( 'Detect customer data in all forms', 'am_all_forms', 1, 'ON — contact and booking forms then feed matching data too.' ),
 			array( 'Form leads', 'track_form_leads', 1, 'ON — form submissions reach Meta as Lead.' ),
 			array( 'Phone default country', 'phone_default_country', 1, 'ON — local-format phone numbers are otherwise dropped.' ),
-			array( 'Browser ID fallback (_fbp)', 'fbp_fallback', 1, 'ON — keeps the browser ID when Meta&#8217;s script is blocked.' ),
+			array( 'Location fill-in', '_geo', null, 'Country, city, region and ZIP (+ ZIP estimated from the city): Meta flags low ZIP coverage when Cloudflare has no postal code. Approximate; customer data always wins.' ),
 			array( 'Block bots', 'block_bots', 1, 'ON — keeps crawler events out of Meta&#8217;s learning.' ),
 			array( 'Excluded roles set', '_roles', null, 'Add administrator, shop_manager so staff and test orders are not tracked.' ),
 			array( 'Event log', 'event_log', 0, 'OFF in production; ON while checking the Diagnostics tab.' ),
@@ -370,6 +404,7 @@ class DXPS_Settings {
 			elseif ( '_ga4_secret' === $key ) { $ok = (bool) DXPS_Helpers::opt( 'ga4_api_secret' ); }
 			elseif ( '_purchase_status' === $key )  { $ok = 'status' === DXPS_Helpers::opt( 'purchase_trigger', 'status' ); }
 			elseif ( '_retention' === $key )        { $ok = (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) >= 30; }
+			elseif ( '_geo' === $key )              { $ok = 'full_zip' === DXPS_Helpers::opt( 'geo_enrich' ); }
 			elseif ( '_roles' === $key )            { $ok = '' !== (string) DXPS_Helpers::opt( 'exclude_roles' ); }
 			elseif ( '_coupons' === $key )          { $ok = false !== strpos( strtolower( DXPS_Helpers::opt( 'excluded_coupons', 'alopeci' ) ), 'alopeci' ); }
 			$badge = $ok
@@ -383,6 +418,8 @@ class DXPS_Settings {
 			<li><strong>Deactivate PixelYourSite</strong> when this plugin takes over the live pixel ID (double events otherwise).</li>
 			<li><strong>Google Ads attribution</strong> — campaigns to 7-day click / 1-day view (longer windows were removed Jan 2026).</li>
 			<li><strong>Facebook Login ID</strong> — detected automatically from your social-login plugin user meta and sent with CAPI events (the ~0.16–10% match-quality lift Meta shows in Events Manager).</li>
-			<li><strong>Cookie banner</strong> — wire accept/decline to <code>dxpsConsent(\'granted\')</code> / <code>dxpsConsent(\'denied\')</code>.</li></ol>';
+			<li><strong>Cookie banner</strong> — wire accept/decline to <code>dxpsConsent(\'granted\')</code> / <code>dxpsConsent(\'denied\')</code>.</li>
+			<li><strong>Meta Events Manager → dataset Settings</strong> — &#8220;Track events automatically without code&#8221; OFF, &#8220;Automatic advanced matching&#8221; ON. Events Meta detects on its own (and Meta tags inside GTM) have no DX event ID, so they can never be covered by the Conversions API and lower &#8220;Event coverage&#8221;.</li>
+			<li><strong>Cloudflare</strong> — make sure Bot Fight Mode / WAF rules do not challenge <code>/wp-json/dxps/v1/</code>; a challenged relay request is a lost server event.</li></ol>';
 	}
 }
