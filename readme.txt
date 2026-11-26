@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 1.9.0
-Stable tag: 1.9.0
+Version: 2.1.0
+Stable tag: 2.4.1
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -82,42 +82,62 @@ bundled. Local tests use mocked requests; no synthetic customer details are sent
 
 == Changelog ==
 
-= 1.9.0 =
-Event coverage (Events Manager: "Rate of pixel events covered by Conversions API", goal 75%)
-* One external ID for both channels. The pixel hashed the 32-character browser ID while the server sent it raw, so
-  Meta saw two different IDs for the same visitor. Browser IDs are now 64-hex values that both channels send as-is;
-  existing IDs are upgraded in place (remembered matching data is kept).
-* The pixel's fbq('init') now carries external_id (it was added later by a second init, after PageView had fired).
-* _fbp is created in Meta's own format before Meta's script starts (the pixel adopts it), so the first server event
-  of a visit has the browser ID, also when an ad blocker stops Meta's script. _fbc from ?fbclid is set in <head>,
-  on the same domain Meta's pixel uses (example.ba, not www.example.ba), so there is no stale second copy.
-* The server relay re-sends _fbp, _fbc and the browser ID as HTTP cookies: Safari limits cookies written by
-  JavaScript to 7 days (24 hours after a click from Facebook). Click ID and browser ID survive for returning visitors.
-* The browser checks the same parameters as the server before sending to Meta (landing page, campaign, traffic
-  source). Before, the server could drop an event the pixel still sent: a pixel event without server coverage.
-* A failed Conversions API request (network error, 429, 5xx) is retried once.
-* Rate limit per visitor (IP + browser ID) instead of per IP: mobile networks put many visitors behind one IP.
-* Diagnostics lists events that were not sent to the Conversions API and why (consent, sensitive page, bot,
-  excluded role, rate limit ...). Warning when Facebook for WooCommerce, Meta Pixel for WordPress, Pixel Caffeine,
-  Pixel Manager or Conversios is active (their pixel events can never be covered by DX's server events).
+= 2.4.1 =
+* Location fill-in also works when the host already restores the visitor's IP from Cloudflare (LiteSpeed, mod_remoteip, cPanel): before, those sites were treated as "direct" and city, region and ZIP were never added.
+* Without Cloudflare, the location comes from WooCommerce's MaxMind database when it is set up (local lookup, cached per IP for a day).
+* Diagnostics: location fill-in source, the Cloudflare headers that arrive, and the matching fields DX sends for your own request.
 
-Event Match Quality (email, phone, Facebook Login ID)
-* Logged-in customers: relayed events now carry their email, name, phone, address, account ID and Facebook Login ID.
-  REST requests without a nonce run as logged out, so these were missing from every relayed event before.
-* Login / CompleteRegistration / Comment send the whole account (was: email only), both external IDs and the login
-  page as the event URL. Accounts with an excluded role are skipped.
-* Profile phone and address are read from the billing fields in user meta (also without WooCommerce) and common
-  phone meta keys; extend with the dxps_user_matching_raw filter.
-* Returning visitors: the SHA-256 matching hashes a visitor gave in a form are kept in their own browser for the
-  "Remember matching data" period and passed to fbq('init'), so pixel events carry email / phone too (before, only
-  server events did). Deleted when consent is withdrawn.
-* Form events: the submitted form is read before the Form / submit: event fires, so it carries that form's data.
-* Location fill-in: new option "+ ZIP estimated from the city" when Cloudflare has no postal code (Meta flagged
-  ZIP coverage). Main postal codes of larger cities in BA, HR, RS, SI, ME; extend with dxps_city_postcodes.
+= 2.4.0 =
+* Location fill-in works: city, region, ZIP and country from Cloudflare's visitor-location headers are added to server events when the customer gave none (since 2.2.0 the setting silently did nothing). Trusted only for requests that really come through Cloudflare. Default: country, city, region and ZIP.
+* Anonymous visitors: WooCommerce's default customer country (the store's country) no longer stands in for the visitor's real country.
+* Order-email links: links to the shop in WooCommerce customer order emails carry a signed token without personal data. A buyer who opens one (and has given consent) is recognised on that device: hashed email, phone, name and address, and the browser ID from checkout. Setting "Order-email links", on by default; only for orders whose buyer allowed marketing.
+* Diagnostics: whether Cloudflare's location headers arrive.
 
-To get the full gain, switch on (Events & Parameters): Automatic detection, All forms, Remember matching data
-30-90 days, Phone numbers (store country), Location fill-in "+ ZIP estimated from the city". Purge the page
-cache after updating. In Events Manager: "Track events automatically without code" OFF.
+= 2.3.1 =
+* Browser ID (fbp) on every server event: _fbp is created before the pixel starts, so a new visitor's first server events carry it (Meta reported about 86%).
+* More server events reach Meta: www and bare domain (and an https site's own http pages) count as the same site for the relay; the rate limit is per browser, so visitors sharing a mobile-carrier or proxy address are no longer throttled together.
+* Diagnostics: relay refusals counted by reason (wrong address, rate limit, bots, consent, health pages, Meta errors) for the last 7 days.
+* IPv6 for server events: after consent the browser looks up its own IPv6 address once a day (default api64.ipify.org, configurable) and server events use it when the site is reached over IPv4. Setting "Visitor IPv6", on by default.
+* Click ID (fbc): recovered from the previous page of the site when the landing page could not store it, and inside the Facebook / Instagram in-app browsers through Meta's official Parameter Builder (setting "In-app click ID", on by default).
+
+= 2.3.0 =
+* Meta Event Match Quality. Customer data now reaches the pixel: Meta uses only the first fbq('init') of a pixel and ignored the re-inits DX used for form data and server-held data. The first init now carries the visitor's hashed email, phone, name and address together with the browser ID.
+* New first-party cookie _dxps_ud keeps a visitor's hashed matching fields (SHA-256 only) for the "Remember matching data" period, so returning visitors and cached pages are matched. Deleted on consent withdrawal.
+* Server relay keeps the customer's identity: signed-in customers are recognised even when the page's REST nonce has expired, and guests' checkout billing is read from their WooCommerce session.
+* Correct visitor IP behind Cloudflare and local proxies (was the proxy's address unless the host restored it). Forwarding headers are trusted only when the request really came through a proxy.
+* Wider form detection: autocomplete and label text, full-name fields split into first and last name (CF7 your-name, "Ime i prezime"), WPForms, Gravity Forms and Elementor name fields, email and phone inputs outside forms.
+* Login and sign-up events send the account's names, phone and address, not only the email.
+* Phone country falls back to the site language when WooCommerce is not active.
+* Defaults: remember matching data 90 days, all forms, phone default country, browser ID fallback and country fill-in are switched on (existing sites once, on update; hand-set values stay).
+* Diagnostics: shows how the visitor IP is resolved; coverage table includes state.
+
+= 2.2.0 =
+* Fixed GA4 attribution: campaign and click-ID parameters (utm_*, gclid, gbraid, wbraid, msclkid) stay in the page address sent to GA4. All other URL parameters are still removed.
+* Meta Conversions API now uses Graph API v25.0 (v21.0 is no longer available).
+* Server relay sends events in batches: one request and one Conversions API call per burst, with far fewer database writes. Expired REST nonces on cached pages no longer drop events for logged-in customers.
+* Better Meta match quality: the browser ID is set before the first PageView, 64-character browser IDs match between pixel and server, and the pixel receives the visitor's hashed matching fields the server already holds.
+* Google Ads: purchase conversions carry cart data (optional Merchant Center ID), optional dynamic remarketing events. GA4: User-ID in the browser, item brand/category/variant, discount, and location for server-side purchases.
+* More click IDs captured (gbraid, wbraid, msclkid, ttclid) with first- and last-touch saved on the order.
+* Feeds: Meta backorders published as "available for order", backorder policy for undated backorders, description fallback instead of exclusion, real category paths in product_type, localised colour/size attribute names, automatic custom labels, Meta stock quantity, tracking parameters for product links.
+* Feeds rebuild at the next hourly check after a price, sale or stock change instead of waiting for the full schedule.
+* See UPGRADE-2.2.md.
+
+= 2.1.0 =
+* Expanded feed editor: automatic local policy/shipping discovery, shipping rows, Google return labels, visual mappings, category suggestions and product previews.
+* Added content/price filters and actionable diagnostics; fixed description word boundaries.
+* Added protected in-page build progress and preserved existing feed URLs.
+* See UPGRADE-2.1.md for setup and platform-validation limits.
+
+= 2.0.0 =
+* Product Feeds tab: Google, Meta, Pinterest, Microsoft and Generic profiles; XML, CSV, TSV and generic JSON.
+* Background batches, atomic publication, resumable checkpoints, product-level validation and reports.
+* Product and variation catalogue fields; shared tracking/feed IDs, sale prices, identifiers and attribute mappings.
+* Consistent consent defaults and withdrawal, Google/Meta normalization, trusted-IP handling.
+* Single Google event owner; consented page_view with redacted URLs; validated public relay.
+* Authorized thank-you order payloads, queued purchases, bounded retries and per-platform delivery markers.
+* Direct Google engine simplified; old inferred segments and DOM price scraping removed.
+* See UPGRADE-2.0.md for migration and limitations.
+
 
 = 1.8.1 =
 * Facebook Login ID is now also read from Nextend Social Login (its own database table), WooCommerce Social Login
