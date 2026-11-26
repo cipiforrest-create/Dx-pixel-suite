@@ -513,13 +513,72 @@ class DXPS_Helpers {
 
 	public static function fbp() { return self::valid_user_data( array( 'fbp' => $_COOKIE['_fbp'] ?? '' ) )['fbp'] ?? ''; }
 
+	/**
+	 * 2.5.0: cookie domain Meta's pixel uses for _fbp / _fbc, as array( subdomain index, domain ):
+	 * www.example.ba -> ( 1, example.ba ); shop.example.com.ba -> ( 2, example.com.ba ); IP or single label -> ( 0, '' ).
+	 */
+	public static function root_domain() {
+		static $r = null;
+		if ( null !== $r ) return $r;
+		$r    = array( 0, '' );
+		$host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+		if ( ! $host || filter_var( $host, FILTER_VALIDATE_IP ) || false === strpos( $host, '.' ) ) return $r;
+		$l    = explode( '.', $host );
+		$n    = count( $l );
+		$take = ( $n >= 3 && 2 === strlen( $l[ $n - 1 ] ) && in_array( $l[ $n - 2 ], array( 'com', 'co', 'org', 'net', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'in' ), true ) ) ? 3 : 2;
+		$take = min( $take, $n );
+		return $r = array( $take - 1, implode( '.', array_slice( $l, -$take ) ) );
+	}
+
+	/** Domain for a cookie whose Meta value starts "fb.<index>." ('' = host-only: index 0 or unknown). */
+	public static function domain_for_index( $index ) {
+		$host  = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+		$l     = explode( '.', $host );
+		$index = (int) $index;
+		if ( $index < 1 || $index + 1 > count( $l ) || filter_var( $host, FILTER_VALIDATE_IP ) ) return '';
+		return implode( '.', array_slice( $l, -( $index + 1 ) ) );
+	}
+
+	/** First-party cookie set by PHP: a real Set-Cookie header, which Safari does not cap at 7 days like script cookies. */
+	public static function set_cookie( $name, $value, $days, $domain = '' ) {
+		if ( headers_sent() ) return;
+		setcookie( $name, $value, array(
+			'expires'  => time() + (int) $days * DAY_IN_SECONDS,
+			'path'     => '/',
+			'domain'   => $domain,
+			'secure'   => is_ssl() || 'https' === wp_parse_url( home_url(), PHP_URL_SCHEME ),
+			'httponly' => false, // Meta's pixel and DX's script read these cookies
+			'samesite' => 'Lax',
+		) );
+		$_COOKIE[ $name ] = $value;
+	}
+
+	/**
+	 * 2.5.0 cookie keeper, run by the server relay: re-sends _fbp, _fbc and the browser ID (pbid) as HTTP cookies with
+	 * the same value and domain. Safari keeps cookies written by JavaScript for 7 days only (24 hours after a click
+	 * from Facebook); refreshed by the server, returning visitors keep their browser ID and click ID.
+	 */
+	public static function refresh_cookies() {
+		if ( headers_sent() || ! self::marketing_allowed() ) return;
+		if ( self::on( 'meta_enabled' ) && self::opt( 'meta_pixel_id' ) ) {
+			foreach ( array( 'fbp', 'fbc' ) as $k ) {
+				$raw = isset( $_COOKIE[ '_' . $k ] ) && is_string( $_COOKIE[ '_' . $k ] ) ? $_COOKIE[ '_' . $k ] : '';
+				$val = self::valid_user_data( array( $k => $raw ) )[ $k ] ?? '';
+				if ( $val && preg_match( '/^fb\.([0-9])\./', $val, $m ) ) self::set_cookie( '_' . $k, $val, 90, self::domain_for_index( (int) $m[1] ) );
+			}
+		}
+		// The browser ID is host-only, as DX's script writes it. Left alone while PixelYourSite may own a cookie of that name.
+		$eid = isset( $_COOKIE['pbid'] ) && is_string( $_COOKIE['pbid'] ) ? strtolower( $_COOKIE['pbid'] ) : '';
+		if ( preg_match( '/^[a-f0-9]{32,64}$/', $eid ) && ! defined( 'PYS_VERSION' ) && ! defined( 'PYS_FREE_VERSION' ) ) self::set_cookie( 'pbid', $eid, 365 );
+	}
+
 	public static function fbc() {
 		$v = isset( $_COOKIE['_fbc'] ) && is_string( $_COOKIE['_fbc'] ) ? $_COOKIE['_fbc'] : '';
 		// A new ad click (a different fbclid) replaces the stored click ID - Meta attributes to the latest click.
 		$click = ( ! empty( $_GET['fbclid'] ) && is_string( $_GET['fbclid'] ) ) ? $_GET['fbclid'] : self::referrer_fbclid();
 		if ( $click && preg_match( '/^[A-Za-z0-9_-]{6,400}$/', $click ) ) {
 			$suffix = '.' . $click;
-			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.1.' . round( microtime( true ) * 1000 ) . $suffix;
+			if ( ! $v || substr( $v, -strlen( $suffix ) ) !== $suffix ) $v = 'fb.' . self::root_domain()[0] . '.' . round( microtime( true ) * 1000 ) . $suffix;
 		}
 		return self::valid_user_data( array( 'fbc'=>$v ) )['fbc'] ?? '';
 	}
@@ -679,7 +738,8 @@ class DXPS_Helpers {
 	 */
 	public static function geo_hashes() {
 		$mode = (string) self::opt( 'geo_enrich' );
-		if ( ! in_array( $mode, array( 'country', 'full' ), true ) ) return array();
+		if ( ! in_array( $mode, array( 'country', 'full', 'full_zip' ), true ) ) return array();
+		$full   = 'country' !== $mode;
 		$raw    = array();
 		$source = self::geo_source();
 		if ( 'cloudflare' === $source || 'cloudflare_restored' === $source || 'filter' === $source ) {
@@ -687,16 +747,40 @@ class DXPS_Helpers {
 			// (edge address, or the visitor address the host restored from it), or a developer filter says so.
 			$c = self::country();
 			if ( preg_match( '/^[A-Z]{2}$/', $c ) && 'T1' !== $c ) $raw['country'] = $c;
-			if ( 'full' === $mode ) {
+			if ( $full ) {
 				foreach ( array( 'ct' => 'HTTP_CF_IPCITY', 'st' => 'HTTP_CF_REGION_CODE', 'zp' => 'HTTP_CF_POSTAL_CODE' ) as $k => $h ) {
 					if ( ! empty( $_SERVER[ $h ] ) && is_string( $_SERVER[ $h ] ) ) $raw[ $k ] = sanitize_text_field( wp_unslash( $_SERVER[ $h ] ) );
 				}
 			}
 		} elseif ( 'maxmind' === $source ) {
 			$raw = self::maxmind_location();
-			if ( 'full' !== $mode ) $raw = array_intersect_key( $raw, array( 'country' => 1 ) );
+			if ( ! $full ) $raw = array_intersect_key( $raw, array( 'country' => 1 ) );
+		}
+		// 2.5.0 (option "+ ZIP estimated from the city"): Cloudflare rarely knows the postal code outside the US, so Meta
+		// reported low ZIP coverage. Use the main postal code of the visitor's city. Approximate, like the rest of fill-in.
+		if ( 'full_zip' === $mode && empty( $raw['zp'] ) && ! empty( $raw['ct'] ) && ! empty( $raw['country'] ) ) {
+			$zip = self::city_postcode( $raw['country'], $raw['ct'] );
+			if ( '' !== $zip ) $raw['zp'] = $zip;
 		}
 		return $raw ? self::matching_hashes( $raw ) : array();
+	}
+
+	/** Main postal code of larger cities in the shop's region. Extend or replace with the dxps_city_postcodes filter. */
+	const CITY_POSTCODES = array(
+		'BA' => array( 'sarajevo' => '71000', 'banjaluka' => '78000', 'tuzla' => '75000', 'zenica' => '72000', 'mostar' => '88000', 'bihac' => '77000', 'bijeljina' => '76300', 'brcko' => '76100', 'prijedor' => '79101', 'doboj' => '74000', 'trebinje' => '89101', 'cazin' => '77220', 'travnik' => '72270', 'livno' => '80101', 'gorazde' => '73000', 'visoko' => '71300', 'gradiska' => '78400', 'zvornik' => '75400', 'konjic' => '88400', 'sirokibrijeg' => '88220', 'bugojno' => '70230', 'lukavac' => '75300', 'zivinice' => '75270', 'gracanica' => '75320', 'gradacac' => '76250', 'srebrenik' => '75350', 'tesanj' => '74260', 'kakanj' => '72240', 'pale' => '71420', 'foca' => '73300', 'capljina' => '88300', 'ljubuski' => '88320', 'velikakladusa' => '77230', 'sanskimost' => '79260', 'jajce' => '70101', 'derventa' => '74400', 'laktasi' => '78250', 'teslic' => '74270', 'prnjavor' => '78430' ),
+		'HR' => array( 'zagreb' => '10000', 'split' => '21000', 'rijeka' => '51000', 'osijek' => '31000', 'zadar' => '23000' ),
+		'RS' => array( 'belgrade' => '11000', 'beograd' => '11000', 'novisad' => '21000', 'nis' => '18000', 'kragujevac' => '34000' ),
+		'SI' => array( 'ljubljana' => '1000', 'maribor' => '2000' ),
+		'ME' => array( 'podgorica' => '81000' ),
+	);
+
+	public static function city_postcode( $country, $city ) {
+		$map = apply_filters( 'dxps_city_postcodes', self::CITY_POSTCODES );
+		$cc  = strtoupper( (string) $country );
+		$key = str_replace( array( 'đ', 'Đ' ), 'd', (string) $city );
+		$key = strtolower( function_exists( 'remove_accents' ) ? remove_accents( $key ) : $key );
+		$key = preg_replace( '/[^a-z]/', '', $key );
+		return ( is_array( $map ) && isset( $map[ $cc ][ $key ] ) && is_scalar( $map[ $cc ][ $key ] ) ) ? (string) $map[ $cc ][ $key ] : '';
 	}
 
 	/**

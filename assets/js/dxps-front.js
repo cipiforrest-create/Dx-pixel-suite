@@ -80,6 +80,22 @@
 		var m = document.cookie.match('(^|;)\\s*' + n + '\\s*=\\s*([^;]+)');
 		return m ? m.pop() : '';
 	}
+	// 2.5.0: _fbp / _fbc go on the domain Meta's pixel uses (example.ba, not www.example.ba) with its subdomain
+	// index in the value, so there is one cookie, not a host-only copy that goes stale after the next ad click.
+	function rootDomain() {
+		if (window.__dxpsRoot) return window.__dxpsRoot;
+		var r = { i: 0, d: '' }, h = location.hostname, l = h.split('.');
+		if (l.length > 1 && !/^[0-9.]+$/.test(h)) for (var j = 1; j < l.length; j++) {
+			var dm = l.slice(-(j + 1)).join('.');
+			document.cookie = '_dxps_t=1;path=/;domain=.' + dm + ';SameSite=Lax';
+			if (document.cookie.indexOf('_dxps_t=1') > -1) { document.cookie = '_dxps_t=;path=/;domain=.' + dm + ';max-age=0'; r = { i: j, d: dm }; break; }
+		}
+		return (window.__dxpsRoot = r);
+	}
+	function metaCookie(n, rest) {
+		var r = rootDomain();
+		document.cookie = n + '=fb.' + r.i + '.' + rest + ';path=/;max-age=' + (90 * 86400) + (r.d ? ';domain=.' + r.d : '') + ';SameSite=Lax' + (location.protocol === 'https:' ? ';Secure' : '');
+	}
 	function setCookie(n, v, days) {
 		document.cookie = n + '=' + v + ';path=/;max-age=' + (days * 86400) + ';SameSite=Lax' + (location.protocol === 'https:' ? ';Secure' : '');
 	}
@@ -109,7 +125,7 @@
 		// A new ad click (different fbclid) replaces the stored click ID; the same click keeps its timestamp.
 		var fbclid = q.get('fbclid'), curFbc = getCookie('_fbc');
 		if (fbclid && /^[A-Za-z0-9_-]{6,400}$/.test(fbclid) && (!curFbc || curFbc.slice(-(fbclid.length + 1)) !== '.' + fbclid)) {
-			setCookie('_fbc', 'fb.1.' + Date.now() + '.' + fbclid, 90);
+			metaCookie('_fbc', Date.now() + '.' + fbclid);
 		}
 	})();
 
@@ -117,7 +133,7 @@
 	// Meta's own format (fb.1.<ms>.<random>) so server events still carry a browser ID.
 	if (cfg.fbpFallback && !getCookie('_fbp')) setTimeout(function () {
 		if (getCookie('_fbp') || (window.dxpsMarketingAllowed && !window.dxpsMarketingAllowed())) return;
-		setCookie('_fbp', 'fb.1.' + Date.now() + '.' + Math.floor(Math.random() * 9e9 + 1e9), 90);
+		metaCookie('_fbp', Date.now() + '.' + Math.floor(Math.random() * 9e9 + 1e9));
 	}, 2500);
 
 	if (!getCookie('_dxps_lp')) setCookie('_dxps_lp', encodeURIComponent(safeUrl(location.href).slice(0, 300)), 90);
@@ -228,6 +244,10 @@
 		['page_title','user_role','tags','post_category','category_name','link_text','search_term','utm_term','utm_content','transactions_count','average_order','predicted_ltv'].forEach(function(k){delete p[k]});
 		['event_url','landing_page','link_url','form_action'].forEach(function(k){if(p[k])p[k]=safeUrl(p[k])});
 		var amDelivery=window.dxpsAmFlush?window.dxpsAmFlush():null;
+		// 2.5.0: the server checks the whole parameter set (landing page, campaign, traffic source ...), the browser only
+		// checked the event's own parameters. An event the server drops but the pixel sends shows up in Events Manager
+		// as a pixel event without Conversions API coverage, so the Meta legs use the same check. Google is unchanged.
+		var metaBlocked = blocked(p);
 
 		var skipGoogle = scope === 'meta_only' || scope === 'gads_only' || (name==='purchase'&&cfg.ga4ServerPurchase); // the Google engine already reports this action itself
 
@@ -307,7 +327,7 @@
 			if (cfg.googleDirect && cfg.ga4Id && typeof gtag === 'function') gtag('event', name, Object.assign({}, glp, {send_to:cfg.ga4Id}));
 		}
 
-		if(scope==='gads_only'||scope==='google_only')return;
+		if(scope==='gads_only'||scope==='google_only'||metaBlocked)return;
 
 		/* Meta — trackSingle: events go ONLY to this plugin's pixel ID,
 		   never to other pixels initialised on the page (e.g. PixelYourSite). */
@@ -454,6 +474,7 @@
 			var f = ev.target;
 			if (!f || f.nodeName !== 'FORM') return;
 			if (f.className && /cart|checkout|login/i.test(f.className)) return; // covered by dedicated events
+			if (window.dxpsAmScan) window.dxpsAmScan(f); // 2.5.0: this Form event already carries the form's own matching data
 			window.dxpsFire({ name: 'form_submit', params: {
 				form_id: (f.id || f.getAttribute('name') || 'form').slice(0, 80),
 				form_action: (f.getAttribute('action') || location.pathname).slice(0, 200)
@@ -523,7 +544,7 @@
 			document.addEventListener('mouseover', function (ev) { if (ev.target.closest && ev.target.closest(arg)) once(); }, true);
 		} else if (type === 'submit') {
 			if (!validSel(arg)) return;
-			document.addEventListener('submit', function (ev) { if (ev.target.closest && ev.target.closest(arg)) fireCustom(ce); }, true);
+			document.addEventListener('submit', function (ev) { if (ev.target.closest && ev.target.closest(arg)) { if (window.dxpsAmScan) window.dxpsAmScan(ev.target); fireCustom(ce); } }, true);
 		} else if (type === 'copy') {
 			document.addEventListener('copy', function () { once(); }, true);
 		} else if (type === 'visits') {
@@ -645,6 +666,8 @@
 			return amPending;
 		}
 		window.dxpsAmFlush=amFlush;
+		// 2.5.0: read every eligible field of one form now, right before its Form / submit event is sent.
+		window.dxpsAmScan=function(root){(root&&root.querySelectorAll?root:document).querySelectorAll('input, select, textarea').forEach(function(el){amCapture(el);});};
 
 		// 1.7.0 (opt-in): identity from mapped URL parameters (email/SMS/booking links). Values go through the
 		// same normalise -> hash -> ingest path as form fields and are never sent in an event URL.

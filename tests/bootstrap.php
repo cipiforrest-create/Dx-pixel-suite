@@ -61,6 +61,7 @@ function wp_unslash( $v ) { return $v; } function absint( $v ) { return abs( (in
 function is_email( $v ) { return (bool) filter_var( $v, FILTER_VALIDATE_EMAIL ); }
 function wp_strip_all_tags( $v ) { return trim( strip_tags( (string) $v ) ); } function strip_shortcodes( $v ) { return $v; } function wp_check_invalid_utf8( $v ) { return $v; }
 function is_wp_error( $v ) { return $v instanceof WP_Error; }
+function remove_accents( $s ) { return strtr( $s, array( 'ć'=>'c','č'=>'c','š'=>'s','ž'=>'z','Ć'=>'C','Č'=>'C','Š'=>'S','Ž'=>'Z' ) ); }
 function is_user_logged_in() { return $GLOBALS['t']['user'] > 0; } function get_current_user_id() { return $GLOBALS['t']['user']; }
 function wp_get_current_user() { $u = new stdClass; $u->roles = $GLOBALS['t']['user'] ? array( 'customer' ) : array(); $u->user_email = 'jane@example.com'; $u->first_name = 'Jane'; $u->last_name = 'Doe'; $u->exists = null; return new class( $u ) { public $roles, $user_email, $first_name, $last_name; function __construct( $u ) { foreach ( get_object_vars( $u ) as $k => $v ) $this->$k = $v; } function exists() { return $GLOBALS['t']['user'] > 0; } }; }
 function get_user_meta() { return ''; }
@@ -84,7 +85,7 @@ class WC_Integration_MaxMind_Geolocation {}
 class WC_Geolocation { static function geolocate_ip( $ip, $fallback = false, $api = true ) { $GLOBALS['t']['geo_calls'] = ( $GLOBALS['t']['geo_calls'] ?? 0 ) + 1; return $GLOBALS['t']['maxmind'][ $ip ] ?? array( 'country' => '', 'state' => '', 'city' => '', 'postcode' => '' ); } } function current_user_can() { return false; }
 function is_admin() { return false; } function wp_doing_ajax() { return false; } function wp_doing_cron() { return false; }
 function wp_generate_uuid4() { return sprintf( '%08x-%04x-4%03x-a%03x-%012x', mt_rand(), mt_rand( 0, 0xffff ), mt_rand( 0, 0xfff ), mt_rand( 0, 0xfff ), mt_rand() ); }
-function wp_remote_post( $url, $args ) { $GLOBALS['t']['http'][] = array( 'url' => $url, 'body' => json_decode( $args['body'], true ), 'headers' => $args['headers'] ); return array( 'code' => 200, 'body' => json_encode( array( 'events_received' => count( json_decode( $args['body'], true )['data'] ?? array( 1 ) ) ) ) ); }
+function wp_remote_post( $url, $args ) { $GLOBALS['t']['http'][] = array( 'url' => $url, 'body' => json_decode( $args['body'], true ), 'headers' => $args['headers'] ); if ( ! empty( $GLOBALS['t']['http_fail'] ) ) { $GLOBALS['t']['http_fail']--; return new WP_Error( 'http_request_failed', 'timeout' ); } return array( 'code' => 200, 'body' => json_encode( array( 'events_received' => count( json_decode( $args['body'], true )['data'] ?? array( 1 ) ) ) ) ); }
 function wp_remote_retrieve_response_code( $r ) { return $r['code']; } function wp_remote_retrieve_body( $r ) { return $r['body']; }
 function wp_get_document_title() { return 'Clip-in extensions – Shop'; }
 function is_singular() { return false; } function get_post_type() { return ''; } function get_the_ID() { return 0; } function is_search() { return false; }

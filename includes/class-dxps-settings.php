@@ -73,7 +73,7 @@ class DXPS_Settings {
 			$o['content_meta_event']  = in_array( $o['content_meta_event'] ?? '', array( 'standard', 'custom' ), true ) ? $o['content_meta_event'] : 'auto';
 			$o['content_read_scroll'] = max( 10, min( 100, absint( $o['content_read_scroll'] ?: 50 ) ) );
 			$o['content_read_time']   = max( 5, min( 600, absint( $o['content_read_time'] ?: 30 ) ) );
-			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full' ), true ) ? $o['geo_enrich'] : '';
+			$o['geo_enrich']          = in_array( $o['geo_enrich'] ?? '', array( 'country', 'full', 'full_zip' ), true ) ? $o['geo_enrich'] : '';
 			// 2.3.1: IPv6 lookup service: an https address only; empty falls back to the default.
 			$ip6 = esc_url_raw( (string) ( $o['ip6_url'] ?? '' ), array( 'https' ) );
 			$o['ip6_url'] = $ip6 ? $ip6 : 'https://api64.ipify.org';
@@ -86,7 +86,30 @@ class DXPS_Settings {
 	}
 
 	/** Another plugin sending to the same Meta pixel counts every shared event twice. */
+	/** 2.5.0: other plugins known to send their own Meta pixel events (plugin folder => name). */
+	const OTHER_META = array(
+		'facebook-for-woocommerce'                           => 'Facebook for WooCommerce',
+		'official-facebook-pixel'                            => 'Meta Pixel for WordPress',
+		'pixel-caffeine'                                     => 'Pixel Caffeine',
+		'woocommerce-google-adwords-conversion-tracking-tag' => 'Pixel Manager for WooCommerce',
+		'pixel-manager-pro-for-woocommerce'                  => 'Pixel Manager Pro for WooCommerce',
+		'facebook-conversion-pixel'                          => 'Facebook Conversion Pixel',
+		'conversios'                                         => 'Conversios',
+	);
+
 	private static function conflict_notice() {
+		// Their pixel events carry their own event IDs, which DX's server events can never match: Events Manager then
+		// reports those events as pixel events without Conversions API coverage, and every shared event counts twice.
+		$others = array();
+		foreach ( (array) get_option( 'active_plugins', array() ) as $pl ) {
+			foreach ( self::OTHER_META as $slug => $label ) {
+				if ( is_string( $pl ) && 0 === strpos( $pl, $slug . '/' ) ) $others[] = $label;
+			}
+		}
+		if ( $others ) {
+			echo '<div class="notice notice-warning"><p><strong>' . esc_html( implode( ', ', array_unique( $others ) ) ) . ' ' . ( count( $others ) > 1 ? 'are' : 'is' ) . ' active.</strong> '
+				. 'If it sends to the same Meta pixel as DX Pixel Suite, its events are counted twice and have event IDs that DX&#8217;s server events cannot match, which lowers &#8220;Event coverage&#8221; in Events Manager. Keep one plugin in charge of the Meta pixel.</p></div>';
+		}
 		$active = false;
 		foreach ( (array) get_option( 'active_plugins', array() ) as $pl ) {
 			if ( is_string( $pl ) && 0 === strpos( $pl, 'pixelyoursite' ) ) { $active = true; break; }
@@ -220,10 +243,10 @@ class DXPS_Settings {
 		echo '<p><input type="url" name="ip6_url" value="' . esc_attr( (string) DXPS_Helpers::opt( 'ip6_url', 'https://api64.ipify.org' ) ) . '" class="regular-text"> <span class="description">IPv6-capable &#8220;what is my IP&#8221; address that returns the IP as plain text.</span></p></td></tr>';
 		echo '<tr><th>In-app click ID</th><td>'; self::c( 'param_builder', 'Use Meta&#8217;s Parameter Builder in the Facebook and Instagram in-app browsers', 'Those browsers often open ad links without the click ID in the address. When no click ID is stored, Meta&#8217;s official script (pinned version, from cdn.jsdelivr.net) recovers it there. Other browsers load nothing extra.' ); echo '</td></tr>';
 		echo '<tr><th>Location fill-in</th><td><select name="geo_enrich">';
-		foreach ( array( '' => 'Off', 'country' => 'Country', 'full' => 'Country, city, region and ZIP (default since 2.4.0)' ) as $gk => $gl ) {
+		foreach ( array( '' => 'Off', 'country' => 'Country', 'full' => 'Country, city, region and ZIP (default since 2.4.0)', 'full_zip' => 'Country, city, region and ZIP + ZIP estimated from the city (2.5.0)' ) as $gk => $gl ) {
 			echo '<option value="' . esc_attr( $gk ) . '" ' . selected( (string) DXPS_Helpers::opt( 'geo_enrich' ), $gk, false ) . '>' . esc_html( $gl ) . '</option>';
 		}
-		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Anything the customer types always wins.</p></td></tr>';
+		echo '</select><p class="description">Adds the visitor&#8217;s location from Cloudflare to server events when the customer has not given an address. It is approximate and derived from the IP address Meta already receives, so expect a small gain. City, region and ZIP need Cloudflare&#8217;s &#8220;Add visitor location headers&#8221; setting. Cloudflare rarely knows the ZIP outside the US: the last option then uses the main postal code of the visitor&#8217;s city (larger cities in BA, HR, RS, SI and ME; extend with the <code>dxps_city_postcodes</code> filter). Anything the customer types always wins.</p></td></tr>';
 		echo '<tr><th>Order-email links</th><td>'; self::c( 'email_identity', 'Recognise returning buyers who open a link in their order email', 'Links to the shop in WooCommerce customer emails about an order get a signed token with no personal data in it. When the buyer opens one and has given consent, their order&#8217;s hashed details are kept in their browser, so later visits match them. Only for orders whose buyer allowed marketing at checkout. Mention it in your privacy policy.' ); echo '</td></tr>';
 		echo '</table><h2>Content tracking (blog posts, pages, services)</h2><table class="form-table">';
 		echo '<tr><th>Track these content types</th><td>';
@@ -330,7 +353,7 @@ class DXPS_Settings {
 		} elseif ( in_array( $src, array( 'cloudflare', 'cloudflare_restored', 'filter' ), true ) && ! $geo_city ) {
 			$next = 'Only the country arrives. In Cloudflare open Rules &rarr; Settings (Managed Transforms) and switch on <em>Add visitor location headers</em>.';
 		} else {
-			$next = 'City, region and ZIP are filled in for visitors who have not given them' . ( 'full' === DXPS_Helpers::opt( 'geo_enrich' ) ? '.' : ' (set &#8220;Location fill-in&#8221; to Country, city, region and ZIP).' );
+			$next = 'City, region and ZIP are filled in for visitors who have not given them' . ( in_array( DXPS_Helpers::opt( 'geo_enrich' ), array( 'full', 'full_zip' ), true ) ? '.' : ' (set &#8220;Location fill-in&#8221; to Country, city, region and ZIP).' );
 		}
 		echo '<p><strong>Location fill-in source:</strong> ' . esc_html( $src_label[ $src ] ) . '. ' . $next . '</p>';
 		echo '<p><strong>Cloudflare headers on your request:</strong> ' . ( $cf_hdr ? esc_html( implode( ', ', $cf_hdr ) ) : 'none' ) . '</p>';
@@ -404,6 +427,7 @@ class DXPS_Settings {
 			array( 'TimeOnPage', 'track_time', 1, 'ON at 30s — pairs with PageScroll for engagement audiences.' ),
 			array( 'Internal clicks', 'track_clicks', 1, 'ON — navigation intent signal; capped at 15/pageview.' ),
 			array( 'Excluded coupons contains "alopeci"', '_coupons', null, 'Keep the exclusion; DX also suppresses recognized sensitive-health contexts.' ),
+			array( 'Location fill-in with ZIP estimate', '_geozip', null, 'Country, city, region and ZIP + ZIP estimated from the city: Cloudflare rarely has the postal code outside the US, and Meta flags low ZIP coverage. Approximate; customer data always wins.' ),
 			array( 'Remember matching data', '_retention', null, 'Set 30 to 90 days so returning visitors keep their matching data. Biggest match-quality lever for anonymous traffic.' ),
 			array( 'Detect customer data in all forms', 'am_all_forms', 1, 'ON — contact and booking forms then feed matching data too.' ),
 			array( 'Form leads', 'track_form_leads', 1, 'ON — form submissions reach Meta as Lead.' ),
@@ -425,6 +449,7 @@ class DXPS_Settings {
 			elseif ( '_ga4_secret' === $key ) { $ok = (bool) DXPS_Helpers::opt( 'ga4_api_secret' ); }
 			elseif ( '_purchase_status' === $key )  { $ok = 'status' === DXPS_Helpers::opt( 'purchase_trigger', 'status' ); }
 			elseif ( '_retention' === $key )        { $ok = (int) DXPS_Helpers::opt( 'am_retention_days', 0 ) >= 30; }
+			elseif ( '_geozip' === $key )           { $ok = 'full_zip' === DXPS_Helpers::opt( 'geo_enrich' ); }
 			elseif ( '_roles' === $key )            { $ok = '' !== (string) DXPS_Helpers::opt( 'exclude_roles' ); }
 			elseif ( '_coupons' === $key )          { $ok = false !== strpos( strtolower( DXPS_Helpers::opt( 'excluded_coupons', 'alopeci' ) ), 'alopeci' ); }
 			$badge = $ok

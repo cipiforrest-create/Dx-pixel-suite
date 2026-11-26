@@ -1,6 +1,6 @@
 === DX Pixel Suite ===
-Version: 2.1.0
-Stable tag: 2.4.1
+Version: 2.5.0
+Stable tag: 2.5.0
 Requires PHP: 7.4
 WooCommerce optional (since 1.8.0). HTTPS and a modern browser recommended.
 Custom patched release for Eynna Hair / Digital X.
@@ -81,6 +81,15 @@ or uplift is claimed. No test events, customer data, token values or exported da
 bundled. Local tests use mocked requests; no synthetic customer details are sent to Meta.
 
 == Changelog ==
+
+= 2.5.0 =
+* Event coverage: _fbp and _fbc are written on the domain Meta's pixel uses (example.ba, not www.example.ba), by the page head, DX's script and the server. Before, a host-only copy sat next to the pixel's cookie and could go stale after the next ad click.
+* The server relay re-sends _fbp, _fbc and the browser ID as first-party HTTP cookies. Safari keeps cookies written by JavaScript for 7 days (24 hours after a click from Facebook), so returning visitors lost their click ID and browser ID.
+* The browser checks the same parameters as the server (landing page, campaign, traffic source) before sending to Meta. An event the server drops is no longer sent by the pixel alone, which Events Manager counted as a pixel event without Conversions API coverage. Google is unchanged.
+* Relayed events get one immediate retry on a network error, rate limit or Meta server error (purchases already had the delivery queue).
+* Warning when Facebook for WooCommerce, Meta Pixel for WordPress, Pixel Caffeine, Pixel Manager or Conversios is active: their pixel events have their own event IDs, which DX's server events cannot match.
+* Location fill-in: new option "+ ZIP estimated from the city" for when Cloudflare / MaxMind know the city but not the postal code (Meta reported low ZIP coverage). Main postal codes of larger cities in BA, HR, RS, SI and ME; extend with the dxps_city_postcodes filter. Off unless chosen.
+* Safeguard: a form is read once more right before its Form event (and custom submit: rules) is sent.
 
 = 2.4.1 =
 * Location fill-in also works when the host already restores the visitor's IP from Cloudflare (LiteSpeed, mod_remoteip, cPanel): before, those sites were treated as "direct" and city, region and ZIP were never added.
