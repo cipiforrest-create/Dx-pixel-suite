@@ -113,6 +113,39 @@ const ok = (c, l) => { console.log((c ? '  ok   ' : '  FAIL ') + l); if (!c) fai
 	const afterDeny = await g.evaluate(() => document.cookie);
 	ok(!afterDeny.includes('_dxps_ud=') && !afterDeny.includes('_dxps_ip='), 'consent withdrawal deletes the matching and IP cookies');
 	ok(gErrors.length === 0, 'no script errors on the guest page ' + gErrors.join(' | '));
+	/* ---- 2.5.0: event coverage ---- */
+	const ctx3 = await browser.newContext();
+	const f = await ctx3.newPage(); const fOrder = [];
+	await f.route('**/*', route => {
+		const u = route.request().url();
+		if (u.includes('/wp-json/dxps/v1/u')) fOrder.push('u');
+		if (u.includes('/wp-json/dxps/v1/e')) fOrder.push('e:' + JSON.parse(route.request().postData()).events.map(e => e.name).join('+'));
+		if (u.includes('/wp-json/')) return route.fulfill({ contentType: 'application/json', body: '{"ok":true}' });
+		if (u.endsWith('/jquery-stub.js')) return route.fulfill({ contentType: 'text/javascript', body: jq });
+		if (u.endsWith('/dxps-front.js')) return route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(__dirname, '../assets/js/dxps-front.js'), 'utf8') });
+		if (u.startsWith('https://www.shop.test/upit/')) return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(path.join(__dirname, '.page-form.html'), 'utf8').replace(/https:\\\/\\\/shop\.test/g, 'https:\\/\\/www.shop.test') });
+		return route.abort();
+	});
+	const fErrors = []; f.on('pageerror', e => fErrors.push(e.message));
+	await f.goto('https://www.shop.test/upit/?fbclid=AdClick98765');
+	await f.waitForTimeout(600);
+	const jar = await ctx3.cookies();
+	const fbp = jar.filter(c => c.name === '_fbp'), fbc = jar.filter(c => c.name === '_fbc');
+	ok(fbp.length === 1 && fbp[0].domain === '.shop.test' && /^fb\.1\./.test(fbp[0].value), '_fbp on the pixel domain (shop.test, not www): ' + fbp.map(c => c.domain + '=' + c.value).join());
+	ok(fbc.length === 1 && fbc[0].domain === '.shop.test' && /^fb\.1\.\d{13}\.AdClick98765$/.test(fbc[0].value), '_fbc on the pixel domain, one cookie: ' + fbc.map(c => c.domain).join());
+	// Email typed without leaving the field (no change/blur), then submitted: the Form event must still carry it.
+	await f.evaluate(() => { document.querySelector('[name=your-email]').value = 'Lejla@Example.ba'; });
+	fOrder.length = 0;
+	await f.click('button');
+	await f.waitForTimeout(1500);
+	const iu = fOrder.indexOf('u'), ie = fOrder.findIndex(x => x.indexOf('form_submit') > -1);
+	ok(iu > -1 && ie > -1 && iu < ie, 'submitted form is read before its Form event is relayed: ' + fOrder.join(','));
+	// Sensitive first-touch campaign: the server would drop the event, so the pixel must not send it alone.
+	const before = await f.evaluate(() => { window.dxpsCfg.ctx = Object.assign({}, window.dxpsCfg.ctx, { utm_campaign: 'medical_promo' }); window.__n = (window.fbq.queue || []).length; window.dxpsFire({ name: 'view_content', params: { content_type: 'service', content_id: '42' } }); return { px: (window.fbq.queue || []).slice(window.__n).filter(c => c[2] === 'ViewContent').length, dl: window.dataLayer.filter(d => d && d.event === 'view_content').length }; });
+	await f.waitForTimeout(1200);
+	ok(before.px === 0 && !fOrder.some(x => x.indexOf('view_content') > -1) && before.dl === 1, 'sensitive campaign: no pixel-only ViewContent, Google dataLayer still receives it');
+	ok(fErrors.length === 0, 'no script errors on the form page ' + fErrors.join(' | '));
+
 	await browser.close();
 	console.log(fail ? `\n${fail} FAILED` : '\nAll browser checks passed');
 	process.exit(fail ? 1 : 0);

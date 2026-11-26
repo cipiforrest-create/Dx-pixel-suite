@@ -163,6 +163,8 @@ class DXPS_Server {
 	public static function relay( WP_REST_Request $req ) {
 		if ( ! self::guard( $req ) ) return new WP_REST_Response( array( 'ok'=>false ), 403 );
 		if ( ! DXPS_Helpers::on( 'server_relay' ) || ! DXPS_Helpers::marketing_allowed() ) { DXPS_Helpers::count_relay( 'consent' ); return new WP_REST_Response( array( 'ok'=>true,'skipped'=>'disabled_or_consent' ) ); }
+		// 2.5.0: re-send _fbp / _fbc / pbid as HTTP cookies so Safari does not drop them after 7 days.
+		if ( ! DXPS_Helpers::sensitive_context( (string) ( $req->get_header( 'referer' ) ?: '' ) ) ) DXPS_Helpers::refresh_cookies();
 
 		// 2.2.0: the browser sends its events in small batches ({events:[...]}); one request, one Conversions API call.
 		// A single event object (the pre-2.2 shape, still used by cached pages) is accepted as a batch of one.
@@ -445,11 +447,18 @@ class DXPS_Server {
 		elseif ( DXPS_Helpers::opt( 'meta_test_code' ) ) $body['test_event_code'] = DXPS_Helpers::opt( 'meta_test_code' );
 
 		$version = preg_replace( '/[^v0-9.]/', '', (string) apply_filters( 'dxps_meta_api_version', self::META_API_VERSION ) );
-		$res = wp_remote_post( 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . rawurlencode( DXPS_Helpers::opt( 'meta_pixel_id' ) ) . '/events', array(
+		$url  = 'https://graph.facebook.com/' . ( $version ?: self::META_API_VERSION ) . '/' . rawurlencode( DXPS_Helpers::opt( 'meta_pixel_id' ) ) . '/events';
+		$args = array(
 			'timeout' => 5,
 			'headers' => array( 'Content-Type' => 'application/json', 'Authorization'=>'Bearer ' . DXPS_Helpers::opt( 'meta_capi_token' ) ),
 			'body'    => wp_json_encode( $body ),
-		) );
+		);
+		$res = wp_remote_post( $url, $args );
+		// 2.5.0: one immediate retry on a network error, rate limit or Meta server error. Relayed events (page views,
+		// content views ...) have no queue behind them: a lost request is a pixel event without server coverage.
+		// Repeating is safe, Meta deduplicates on event_name + event_id.
+		$code = is_wp_error( $res ) ? 0 : (int) wp_remote_retrieve_response_code( $res );
+		if ( 0 === $code || 429 === $code || $code >= 500 ) { usleep( 300000 ); $res = wp_remote_post( $url, $args ); }
 		if ( is_wp_error( $res ) ) {
 			$result = array( 'ok' => false, 'status' => 'transport_error' );
 		} else {

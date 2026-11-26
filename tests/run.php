@@ -262,6 +262,30 @@ unset( $GLOBALS['t']['options']['woocommerce_maxmind_geolocation_settings'] );
 ok( 'none' === DXPS_Helpers::geo_source(), 'nothing configured: no location source' );
 $_SERVER = $srv; $_COOKIE = array(); $GLOBALS['t']['user'] = $u0;
 
+echo "Event coverage + ZIP (2.5.0)\n";
+ok( array( 1, 'shop.test' ) === DXPS_Helpers::root_domain(), 'pixel cookie domain of the site' );
+ok( 'shop.test' === DXPS_Helpers::domain_for_index( 1 ) && '' === DXPS_Helpers::domain_for_index( 0 ) && '' === DXPS_Helpers::domain_for_index( 4 ), 'cookie domain from the fb.<index>. value' );
+ok( '77000' === DXPS_Helpers::city_postcode( 'BA', 'Bihać' ) && '78000' === DXPS_Helpers::city_postcode( 'ba', 'Banja Luka' ) && '76100' === DXPS_Helpers::city_postcode( 'BA', 'Brčko' ) && '' === DXPS_Helpers::city_postcode( 'BA', 'Atlantis' ), 'main postal code of a city (diacritics, spaces)' );
+settings( array( 'geo_enrich' => 'full_zip', 'consent_mode' => 0 ) );
+$_SERVER = array_merge( $srv, array( 'REMOTE_ADDR' => '89.146.10.20', 'HTTP_CF_RAY' => '8f1a2b3c4d5e6f70-SJJ', 'HTTP_CF_CONNECTING_IP' => '89.146.10.20', 'HTTP_CF_IPCOUNTRY' => 'BA', 'HTTP_CF_IPCITY' => 'Sarajevo' ) );
+$geo = DXPS_Helpers::geo_hashes();
+ok( hash( 'sha256', '71000' ) === ( $geo['zp'] ?? '' ), 'no Cloudflare postal code: ZIP estimated from the city' );
+$_SERVER['HTTP_CF_POSTAL_CODE'] = '71210';
+ok( hash( 'sha256', '71210' ) === ( DXPS_Helpers::geo_hashes()['zp'] ?? '' ), 'a real postal code wins over the estimate' );
+settings( array( 'geo_enrich' => 'full', 'consent_mode' => 0 ) ); unset( $_SERVER['HTTP_CF_POSTAL_CODE'] );
+ok( ! isset( DXPS_Helpers::geo_hashes()['zp'] ), 'plain "full" mode does not estimate' );
+$_SERVER = $srv;
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'meta_capi_token' => 'tok', 'consent_mode' => 0 ) );
+$GLOBALS['t']['transients'] = array();
+$_COOKIE = array( '_fbp' => 'fb.1.1700000000000.1234567890', '_fbc' => 'fb.1.1700000000000.AbCdEf123', 'pbid' => str_repeat( 'ab', 16 ) );
+$n0 = count( $GLOBALS['t']['http'] ); $GLOBALS['t']['http_fail'] = 1;
+$r = DXPS_Server::relay( new WP_REST_Request( array( 'events' => array( $ev( 'view_content', 'vc.1', array( 'content_id' => '42', 'content_type' => 'service' ) ) ) ), $h ) );
+ok( 2 === count( $GLOBALS['t']['http'] ) - $n0 && ! empty( $r->data['ok'] ), 'relay: one retry after a network error, then accepted' );
+ok( 'fb.1.1700000000000.1234567890' === $_COOKIE['_fbp'] && 'fb.1.1700000000000.AbCdEf123' === $_COOKIE['_fbc'], 'relay re-sends _fbp / _fbc unchanged (server cookie keeper)' );
+$_GET = array( 'fbclid' => 'NewClick987' ); $_COOKIE = array( '_fbc' => 'fb.1.1700000000000.AbCdEf123' );
+ok( 1 === preg_match( '/^fb\.1\.[0-9]{13}\.NewClick987$/', DXPS_Helpers::fbc() ), 'a new ad click replaces the click ID, with the pixel domain index' );
+$_GET = array(); $_COOKIE = array();
+
 /* ---------------- rendered page (consumed by tests/browser.js) ---------------- */
 settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'ga4_enabled' => 1, 'ga4_id' => 'G-TEST', 'gads_enabled' => 1, 'gads_conversion_id' => 'AW-1', 'gads_purchase_label' => 'lbl', 'gads_merchant_id' => '5551234', 'gads_feed_country' => 'ba', 'gads_remarketing' => 1, 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'fbp_fallback' => 1 ) );
 $_SERVER['REQUEST_URI'] = '/product/1/';
@@ -281,6 +305,13 @@ file_put_contents( __DIR__ . '/.page-guest.html', '<!doctype html><html><head><t
 	. '<form id="kontakt"><label for="f-name">Ime i prezime</label><input id="f-name" name="your-name" type="text">'
 	. '<input name="your-email" type="email"><label for="f-tel">Broj telefona</label><input id="f-tel" name="field_3" type="text">'
 	. '<input name="your-subject" type="text"><input name="password" type="password"></form>'
+	. '<script src="/jquery-stub.js"></script><script src="/dxps-front.js"></script></body></html>' );
+
+// 2.5.0: form tracking on, for the Form-event and cookie-domain checks in tests/browser.js.
+settings( array( 'server_relay' => 1, 'meta_enabled' => 1, 'meta_pixel_id' => '123', 'consent_mode' => 0, 'track_scroll' => 0, 'track_time' => 0, 'track_clicks' => 0, 'auto_am' => 1, 'am_all_forms' => 1, 'phone_default_country' => 1, 'am_retention_days' => 90, 'fbp_fallback' => 1, 'track_forms' => 1 ) );
+ob_start(); DXPS_Tracking::head_output(); $formpage = ob_get_clean();
+file_put_contents( __DIR__ . '/.page-form.html', '<!doctype html><html><head><title>Upit</title>' . str_replace( 'http:\/\/shop.test', 'https:\/\/shop.test', $formpage ) . '</head><body>'
+	. '<form id="upit" action="/upit/" onsubmit="return false"><input name="your-email" type="email"><button>Pošalji</button></form>'
 	. '<script src="/jquery-stub.js"></script><script src="/dxps-front.js"></script></body></html>' );
 
 echo $fail ? "\n$fail FAILED\n" : "\nAll PHP checks passed\n";
